@@ -1,0 +1,93 @@
+# redactor rules - copy to ~/.config/redactor.conf, /etc/redactor.conf
+# or to a .redactor file next to the data you work on.
+#
+# One rule per line:   <search>  <replacement>
+# Lines starting with '#' are comments. Rules are applied top to bottom,
+# and every rule is applied to every line.
+
+# --- literal replacements (plain substring, no regex) ---------------------
+# The search text is taken 100% literally, so dots, @ and + need no escaping.
+# NOTE: this matches inside words too - 'robert' also hits 'roberta'.
+#       Use @word (below) when that is not what you want.
+
+company.com             example.com
+foo@email.com           redacted@example.com
+
+# Values containing spaces need quotes:
+"Robert Mueller"        "Max Mustermann"
+
+# Only a search given -> replaced with [REDACTED]:
+hunter2
+
+# --- @word: literal, but whole words only ---------------------------------
+# 'robert' -> user1, but 'roberta' and 'robert123' stay untouched.
+# Use this for short, common words that appear as a syllable elsewhere.
+
+@word robert            user1
+@word admin             ACCOUNT
+
+# --- builtins: detect a whole class of values and pseudonymize it ---------
+# The same value always gets the same placeholder, so you can still follow
+# "who talked to whom" in the redacted output. Use --map to keep that mapping
+# stable across several runs / files.
+
+@ip                     # 192.168.1.50 -> 10.0.0.1, 8.8.8.8 -> 10.0.0.2, ...
+@email                  # any address  -> redacted1@example.com, ...
+#@mac                   # any MAC      -> 02:00:00:00:00:01, ...
+
+# Without arguments this host's own name(s) are used:
+@hostname
+# ...or name them explicitly (matched as whole words):
+#@hostname web01 db01.corp.local
+
+# Without arguments the current username is used:
+@user
+# ...or name them explicitly (matched as whole words):
+#@user robert alice bob
+
+# URLs: https://git.corp.local/team/x?token=abc -> https://host1/team/x
+# Keeps scheme/port/path, pseudonymizes the host (same table as @hostname),
+# drops userinfo + query + fragment, because that is where credentials live.
+@uri
+
+# Home directories: /home/alice/... -> /home/user1/... (same table as @user)
+@path
+# With arguments it is a literal prefix replacement. Note this is the only way
+# to write it: a bare "/home/alice/myproject/ PROJECT/" would be parsed as a
+# /regex/, because it starts and ends with a slash.
+#@path /home/alice/myproject/  PROJECT/
+
+# SSH fingerprints identify one specific key, i.e. one person:
+#@sshkey
+
+# Phone numbers. The default only takes international formats (+41.., 0041..),
+# where the + is a strong signal. National formats are opt-in per country
+# because a bare "079 123 45 67" looks like any other number in a log:
+#@phone
+#@phone ch de
+
+# --- @keep: values that are public and must survive -----------------------
+# Without this, @ip pseudonymizes 127.0.0.1 (which tells nobody anything) and
+# @uri turns every https://github.com/... link in your README into
+# https://host1/..., destroying the document. @keep applies to every rule
+# regardless of line order, and shows up in --list-rules.
+
+@keep 127.0.0.1 ::1 0.0.0.0 localhost
+#@keep 8.8.8.8 1.1.1.1
+#@keep github.com gitlab.com stackoverflow.com docs.python.org example.com
+
+# --- @secret: catch the things you forgot to list -------------------------
+# Vendor tokens (AKIA.., ghp_.., AIza..), JWTs, ?token=.. query params,
+# Bearer/Basic headers, cookies, password hashes ($6$.., $2y$..),
+# password=.. assignments, and whole private key blocks.
+# One-way: [SECRET] is a marker, not a pseudonym, so --unredact cannot undo it.
+# Deliberately aggressive - in code it may also hit 'token = get_token()'.
+# Check with --diff or --stats what it actually replaced.
+
+@secret
+
+# --- regex, when a literal is not enough ----------------------------------
+# Wrap the pattern in slashes. \1 backreferences work in the replacement.
+
+/sess_[0-9a-f]{32}/             SESSION_REDACTED
+/(?i)geheim/                    X

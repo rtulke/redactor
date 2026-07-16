@@ -1,0 +1,356 @@
+.\" Man page for redactor
+.\" The version and date in .TH are rewritten by scripts/release.sh -- if you
+.\" change that line's shape, update the sed there too.
+.TH REDACTOR 1 "2026-07-16" "redactor 1.3.0" "User Commands"
+.
+.SH NAME
+redactor \- anonymize texts, logs, READMEs and code
+.
+.SH SYNOPSIS
+.B redactor
+[\fIOPTION\fR]... [\fIFILE\fR]...
+.
+.SH DESCRIPTION
+.B redactor
+is
+.BR sed (1)
+with a predefined rule list. It reads text from standard input, or from the
+given \fIFILE\fRs, applies every rule from its config files, and writes the
+result to standard output.
+.PP
+Its distinguishing feature is
+.B stable pseudonymization:
+the same value always becomes the same placeholder, so a redacted log still
+shows that two lines concern the same client without revealing which one. With
+.B \-\-map
+that mapping survives across runs and files, which is what keeps a redacted
+README consistent with the code next to it.
+.PP
+.B redactor
+imports nothing outside the Python standard library.
+.
+.SH OPTIONS
+.SS Rules
+.TP
+.BR \-e ", " \-\-expr " \fIRULE\fR"
+Add a rule. Same syntax as a config line, so
+.B \-e 'robert user1'
+is identical to the config line \fBrobert user1\fR. Repeatable.
+.TP
+.BR \-f ", " \-\-file " \fIPATH\fR"
+Load an additional rule file. Repeatable.
+.TP
+.BR \-p ", " \-\-profile " \fINAME\fR"
+Load a ready-made rule set: \fBwebserver\fR, \fBsshd\fR, \fBdhcpd\fR,
+\fBftp\fR, \fBmail\fR, \fBconfigfiles\fR. Repeatable. Loaded before
+.BR \-f ,
+so your own rule files can extend a profile.
+.TP
+.B \-\-list\-profiles
+Print the available profiles and where they came from, then exit.
+.TP
+.BR \-n ", " \-\-no\-config
+Ignore \fI/etc/redactor.conf\fR, \fI~/.config/redactor.conf\fR and
+\fI.redactor\fR, and do not auto-discover a \fI.redactor.map\fR. Use only what
+was passed on the command line.
+.TP
+.BR \-l ", " \-\-list\-rules
+Print the loaded rules with their source, then exit. The fastest way to answer
+"why is my rule not matching?".
+.
+.SS How to replace
+.TP
+.BR \-a ", " \-\-ask
+Confirm every replacement: \fBy\fR (or Enter) yes, \fBn\fR no, \fBa\fR yes to
+all remaining. The dialog is read from \fI/dev/tty\fR, not standard input, so
+it works in the middle of a pipe. Without a terminal this is an error rather
+than a silent full redaction.
+.TP
+.BR \-b ", " \-\-blank
+Ignore the configured replacements and emit as many spaces as the match was
+long. Same length, not empty, so columns in logs and indentation in code
+survive.
+.TP
+.BR \-k ", " \-\-keep\-length
+Keep the pseudonym but pad it with spaces to the length of the original.
+.
+.SS What to do with the result
+.TP
+.BR \-i ", " \-\-in\-place
+Rewrite the given files instead of writing to standard output. Requires file
+arguments. Written via a temporary file and
+.BR rename (2),
+so a crash never leaves a half-redacted file; file modes are preserved and
+files with no matches are not touched at all.
+.TP
+.BR \-d ", " \-\-diff
+Show a unified diff of what would change. Writes no redacted output.
+.TP
+.BR \-c ", " \-\-check
+Report what would be replaced and exit 1 on any match. Writes no output.
+Intended for pre-commit hooks and CI.
+.TP
+.BR \-A ", " \-\-audit
+Report values that look sensitive but no rule touched. Redacts nothing, writes
+no output, always exits 0. Heuristic and deliberately chatty: it asks whether
+you meant to keep something, it does not decide. It inspects the \fIoutput\fR,
+and ignores both redactor's own placeholders and everything \fB@keep\fR spared.
+.TP
+.BR \-s ", " \-\-stats
+After processing, print the match count per rule to standard error.
+.PP
+.BR \-i ", " \-d ", " \-c " and " \-A
+are mutually exclusive.
+.
+.SS Mapping
+.TP
+.BR \-m ", " \-\-map " \fIPATH\fR"
+Keep the value-to-placeholder mapping in \fIPATH\fR (JSON), so the same host,
+IP or user gets the same placeholder across runs and files. Created if missing.
+An existing \fI.redactor.map\fR is picked up automatically, searched upwards
+from the current directory; creating one always requires an explicit
+.BR \-\-map .
+.IP
+The map is the key to reversing the redaction. Do not commit it.
+.TP
+.BR \-u ", " \-\-unredact
+Apply the mapping backwards, turning placeholders back into the original
+values. Requires a map.
+.B @secret
+is excluded by design: it writes a fixed marker rather than a pseudonym, so it
+is one-way.
+.TP
+.BR \-V ", " \-\-version
+Print version, author and project URL.
+.
+.SH RULE SYNTAX
+One rule per line; \fB#\fR at the start of a line is a comment. Values
+containing spaces go in quotes. The same syntax is used for
+.BR \-e .
+.
+.SS Literal (the default)
+.PP
+.RS 4
+.EX
+company.com             example.com
+foo@email.com           redacted@example.com
+"Robert Mueller"        "Max Mustermann"
+hunter2                                       # no replacement \-> [REDACTED]
+.EE
+.RE
+.PP
+The search text is taken literally \(em it is not a regex, so \fB.\fR, \fB@\fR
+and \fB+\fR need no escaping. A literal matches inside words too: \fBrobert\fR
+also hits \fBroberta\fR. That is the safe direction; see
+.B @word
+below.
+.
+.SS @word \(em whole words only
+.PP
+.RS 4
+.EX
+@word robert            user1
+.EE
+.RE
+.PP
+Matches \fBrobert\fR, \fBrobert,\fR and \fBrobert@x.ch\fR, but not
+\fBroberta\fR, \fBrobert123\fR or \fBxrobert\fR. "Word" means no letter, digit
+or underscore directly adjacent.
+.PP
+Literal is the default because the two failure directions are not equal: a
+literal that is too broad over-redacts, which is cosmetic; a
+.B @word
+that is too narrow under-redacts, which is a leak.
+.
+.SS Classes
+.TP
+.B @ip ", " @ipv6
+Every address \(-> \fB10.0.0.1\fR, \fBfd00::1\fR
+.TP
+.B @email
+Every address \(-> \fBredacted1@example.com\fR
+.TP
+.B @mac
+Every MAC \(-> \fB02:00:00:00:00:01\fR (a locally administered range, so the
+pseudonym's OUI means nothing)
+.TP
+.BR @hostname " [\fINAME\fR...]"
+Without arguments, this host's own names \(-> \fBhost1\fR
+.TP
+.BR @user " [\fINAME\fR...]"
+Without arguments, the current user \(-> \fBuser1\fR
+.TP
+.B @uri
+\fBhttps://git.corp/x?token=a\fR \(-> \fBhttps://host1/x\fR. Scheme, port and
+path are kept; the host is pseudonymized through the same table as
+.BR @hostname ;
+userinfo, query and fragment are dropped, because that is where credentials
+live. Needs \fB://\fR \(em an access-log request line has no scheme, and its
+query string is caught by
+.B @secret
+instead.
+.TP
+.BR @path " [\fIPREFIX\fR [\fIREPLACEMENT\fR]]"
+Without arguments, home directories: \fI/home/alice/x\fR \(->
+\fI/home/user1/x\fR, mapped through the same table as
+.BR @user .
+With arguments, a literal prefix replacement. This is the only way to write it:
+a bare rule \fB/home/alice/myproject/ X\fR would be parsed as a regex, because
+it starts and ends with a slash.
+.TP
+.B @sshkey
+\fBSHA256:\fR fingerprints and \fBssh-rsa AAAA...\fR keys \(-> \fBsshkey1\fR.
+A fingerprint is not a secret but it is a stable identifier: two logs sharing
+one prove the same person touched both.
+.TP
+.BR @phone " [\fICOUNTRY\fR...]"
+International formats only by default (\fB+41...\fR, \fB0041...\fR) \(->
+\fBphone1\fR, validated against E.164's 8-15 digit range, and mapped on the
+normalized number so two spellings share one pseudonym. National formats are
+opt-in per country (\fBch\fR, \fBde\fR, \fBat\fR, \fBus\fR) because a bare
+\fB079 123 45 67\fR looks like any other number in a log.
+.TP
+.B @secret
+Vendor tokens, JWTs, query parameters, Bearer/Basic headers, cookies, password
+hashes, \fBpassword=\fR assignments, SNMP community strings and whole private
+key blocks \(-> \fB[SECRET]\fR. Not pseudonymized and not reversible: a token
+should be gone, not correlated. Deliberately trigger-happy \(em in code it also
+hits \fBtoken = get_token()\fR.
+.TP
+.BR @keep " \fIVALUE\fR..."
+The opposite: never replace these. Without it,
+.B @ip
+pseudonymizes \fB127.0.0.1\fR and
+.B @uri
+turns every \fBhttps://github.com/...\fR link in a README into
+\fBhttps://host1/...\fR. A kept URI host leaves the whole URL alone, query
+included. Applies globally regardless of line order, and appears in
+.BR \-\-list\-rules .
+.
+.SS Regex and blocks
+.PP
+.RS 4
+.EX
+/sess_[0-9a-f]{32}/     SESSION_REDACTED
+/(password=)\eS+/        "\e1REDACTED"
+/(?i)secret/            X
+@block /\-\-\-\-\-BEGIN CERTIFICATE\-\-\-\-\-/ /\-\-\-\-\-END CERTIFICATE\-\-\-\-\-/ "[CERT]"
+.EE
+.RE
+.PP
+A pattern wrapped in slashes is a regex; \fB\e1\fR backreferences work in the
+replacement.
+.B @block
+replaces everything between two markers with a single text, and is line-based
+so streaming still works on large logs. If input ends inside a block, the
+remainder stays redacted.
+.
+.SH FILES
+.TP
+.I /etc/redactor.conf
+System-wide rules.
+.TP
+.I ~/.config/redactor.conf
+Per-user rules. Honours \fB$XDG_CONFIG_HOME\fR.
+.TP
+.I .redactor
+Per-project rules, searched upwards from the current directory like
+\fI.gitignore\fR.
+.TP
+.I .redactor.map
+Value-to-placeholder mapping, searched upwards. Never committed.
+.TP
+.I /usr/share/redactor/profiles/
+Ready-made rule sets. Also searched in
+\fI~/.config/redactor/profiles/\fR and next to the script.
+.PP
+Config files accumulate in the order listed above, then
+.BR \-p ,
+then
+.BR \-f ,
+then
+.BR \-e .
+Rules are applied in that same order, and each rule operates on the output of
+the previous one \(em so \fBfoo bar\fR followed by \fBbar baz\fR turns \fBfoo\fR
+into \fBbaz\fR.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Success. Also the normal result of
+.B \-\-audit
+and of
+.B \-\-check
+when nothing matched.
+.TP
+.B 1
+.B \-\-check
+found at least one match.
+.TP
+.B 2
+Usage error, or a file could not be read or written.
+.TP
+.B 130
+Interrupted.
+.
+.SH EXAMPLES
+.PP
+Filter a log:
+.RS 4
+.EX
+cat /var/log/messages | redactor
+.EE
+.RE
+.PP
+Use a ready-made rule set:
+.RS 4
+.EX
+redactor \-p webserver /var/log/apache2/access.log
+.EE
+.RE
+.PP
+Anonymize files that belong together, keeping the pseudonyms consistent between
+them:
+.RS 4
+.EX
+redactor \-d \-m .redactor.map README.md src/*.py    # look first
+redactor \-i \-m .redactor.map README.md src/*.py    # then do it
+.EE
+.RE
+.PP
+Block a commit that still contains real data:
+.RS 4
+.EX
+redactor \-c $(git diff \-\-cached \-\-name\-only) || exit 1
+.EE
+.RE
+.PP
+Ask what was missed:
+.RS 4
+.EX
+redactor \-p webserver \-A access.log
+.EE
+.RE
+.PP
+Find out which machine \fBhost1\fR was:
+.RS 4
+.EX
+redactor \-u \-m .redactor.map answer.txt
+.EE
+.RE
+.
+.SH SEE ALSO
+.BR sed (1),
+.BR gitignore (5)
+.PP
+Full documentation:
+.UR https://github.com/rtulke/redactor
+.UE
+.
+.SH AUTHOR
+Robert Tulke <rt@debian.sh>
+.
+.SH REPORTING BUGS
+A detector that misses something is a security bug, not a feature request:
+.UR https://github.com/rtulke/redactor/issues
+.UE

@@ -1,0 +1,95 @@
+# Native package for redactor. Built by .github/workflows/release.yml via nfpm.
+# Version comes from the env, set out of redactor.py's __version__.
+#
+# ONE package, not two. sshscan ships sshscan + sshscan-bin because it needs
+# PyYAML, so a system without python3-yaml needs the bundled flavour. redactor
+# imports nothing outside the standard library, so the distro's python3 is
+# always enough - a PyInstaller build would add 8.5 MB and an AV/EDR false
+# positive to solve a problem that does not exist here.
+name: redactor
+arch: all # deb -> all, rpm -> noarch. Pure Python, nothing to compile,
+          # so one artifact covers amd64, arm64 and everything else.
+platform: linux
+version: ${PKG_VERSION}
+section: utils
+priority: optional
+maintainer: Robert Tulke <rt@debian.sh>
+description: |
+  Anonymize texts, logs, READMEs and code.
+  sed with a predefined rule list: reads its rules from /etc/redactor.conf,
+  ~/.config/redactor.conf and .redactor, then pseudonymizes IPs, hostnames,
+  users, e-mail addresses, URLs, paths, MACs, SSH keys and phone numbers
+  stably - the same value always becomes the same placeholder - and strips
+  API keys, tokens and password hashes. Ships ready-made profiles for
+  apache/nginx, sshd, dhcpd, ftp, mail and config files.
+vendor: Robert Tulke
+homepage: https://github.com/rtulke/redactor
+license: MIT
+
+# No openssh-client style runtime tools needed - redactor only ever reads stdin
+# and files. python3 is the entire dependency, and 3.8 is the floor because of
+# sys.stdout.reconfigure() and the dict-ordering the mapper relies on.
+overrides:
+  deb:
+    depends:
+      - python3 (>= 3.8)
+  rpm:
+    depends:
+      - python3 >= 3.8
+
+contents:
+  # redactor.py carries the #!/usr/bin/env python3 shebang already; the workflow
+  # copies it to dist/redactor so the installed command has no .py suffix.
+  - src: ./dist/redactor
+    dst: /usr/bin/redactor
+    file_info:
+      mode: 0755
+
+  # config|noreplace: an upgrade must never overwrite the rules someone wrote.
+  - src: ./redactor.conf.example
+    dst: /etc/redactor.conf
+    type: config|noreplace
+
+  # Shipped uncompressed. dpkg and rpm both compress man pages on install
+  # themselves, and man(1) reads either form - handing them a .gz would just
+  # mean it gets recompressed or left as-is depending on the distro.
+  - src: ./man/redactor.1
+    dst: /usr/share/man/man1/redactor.1
+    file_info:
+      mode: 0644
+
+  # The completion calls `redactor --list-profiles` at tab time rather than
+  # globbing a directory, so it also finds profiles in ~/.config.
+  - src: ./completion/redactor.bash-completion
+    dst: /usr/share/bash-completion/completions/redactor
+    file_info:
+      mode: 0644
+
+  # profile_dirs() looks here, so `redactor -p webserver` works after install.
+  # Listed one by one on purpose: a glob would silently ship whatever happens to
+  # be in profiles/, and a new profile that is missing here works from a git
+  # checkout while being absent from the package - the kind of bug you only find
+  # after the release.
+  - src: ./profiles/webserver.conf
+    dst: /usr/share/redactor/profiles/webserver.conf
+  - src: ./profiles/sshd.conf
+    dst: /usr/share/redactor/profiles/sshd.conf
+  - src: ./profiles/dhcpd.conf
+    dst: /usr/share/redactor/profiles/dhcpd.conf
+  - src: ./profiles/ftp.conf
+    dst: /usr/share/redactor/profiles/ftp.conf
+  - src: ./profiles/mail.conf
+    dst: /usr/share/redactor/profiles/mail.conf
+  - src: ./profiles/configfiles.conf
+    dst: /usr/share/redactor/profiles/configfiles.conf
+
+  - src: ./LICENSE
+    dst: /usr/share/doc/redactor/LICENSE
+  - src: ./README.md
+    dst: /usr/share/doc/redactor/README.md
+  - src: ./README_de.md
+    dst: /usr/share/doc/redactor/README_de.md
+  - src: ./CHANGELOG.md
+    dst: /usr/share/doc/redactor/CHANGELOG.md
+  - src: ./redactor.conf.example
+    dst: /usr/share/doc/redactor/redactor.conf.example

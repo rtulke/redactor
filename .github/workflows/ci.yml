@@ -1,0 +1,126 @@
+name: CI
+
+# release.yml only fires on a tag, which means a broken commit on main would sit
+# there undetected until release day - and by then the fix costs a tag. This is
+# the same suite, run on every push and PR instead.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # ruff is a lint-time tool only; it never becomes a runtime dependency, so
+      # this does not dent the "stdlib only" claim the packaging rests on.
+      #
+      # This works here but NOT on a stock Ubuntu 24.04 / Debian 12 desktop:
+      # those mark the system Python externally managed (PEP 668) and refuse
+      # pip, and ruff is not in apt. setup-python's interpreter is not marked,
+      # so pip is fine. Locally, use pipx -- see the README.
+      #
+      # Pinned exactly, and it stays that way. ruff is pre-1.0 and moves fast;
+      # floating means a ruff release can turn an unrelated PR red overnight.
+      # The narrow rule set in ruff.toml stops NEW rules from being picked up on
+      # their own, but not a behaviour change inside F. Bump this deliberately:
+      #   pip install -U ruff && ruff check .   # locally first
+      - name: Install ruff
+        run: pip install ruff==0.15.21
+
+      # Config and reasoning live in ruff.toml. The rule set is narrow on
+      # purpose: a lint job people learn to ignore is worse than no lint job.
+      - name: ruff check
+        run: ruff check --output-format=github .
+
+  test:
+    name: test py${{ matrix.python-version }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 is the floor declared in packaging/nfpm.yaml. Tested, not assumed:
+        # sys.stdout.reconfigure() and the mapper's reliance on dict ordering
+        # both need >= 3.7, and a stray f-string or walrus would raise the floor
+        # without anyone noticing until a Rocky box says SyntaxError.
+        python-version: ['3.8', '3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # No pip install step. That is not an oversight - tests/test_redactor.py
+      # asserts redactor.py imports nothing outside the standard library, which
+      # is the assumption the whole packaging story rests on (noarch, no venv,
+      # no PyInstaller flavour).
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v
+
+  # The packaging is as breakable as the code, and it only ever ran on a tag.
+  # Building here means a broken nfpm.yaml fails on the PR that broke it.
+  package:
+    name: build packages (dry run)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: |
+          set -eux
+          PKG_VERSION=$(python3 -c "import re;print(re.search(r\"__version__\s*=\s*'([^']+)'\", open('redactor.py').read()).group(1))")
+          export PKG_VERSION
+          mkdir -p dist out
+          cp redactor.py dist/redactor
+          chmod +x dist/redactor
+          nfpm package -f packaging/nfpm.yaml -p deb -t out/
+          nfpm package -f packaging/nfpm.yaml -p rpm -t out/
+          ls -lh out/
+
+      # Catches the classic: a new profile added to profiles/ but never listed in
+      # packaging/nfpm.yaml, so it works in the checkout and is missing from the
+      # package.
+      - name: Every profile must be in the package
+        run: |
+          set -eu
+          fail=0
+          for f in profiles/*.conf; do
+            name=$(basename "$f")
+            if ! grep -q "profiles/$name" packaging/nfpm.yaml; then
+              echo "::error file=packaging/nfpm.yaml::$name is in profiles/ but not shipped"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Install it and use it
+        run: |
+          set -eux
+          sudo apt-get install -y ./out/redactor_*_all.deb
+          redactor --version
+          redactor --list-profiles | grep -q webserver
+          test "$(echo 'ping 192.168.1.50' | redactor -n -e '@ip')" = "ping 10.0.0.1"
+          sudo apt-get remove -y redactor

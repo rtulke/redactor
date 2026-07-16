@@ -1,0 +1,216 @@
+name: Release
+
+# Tag push -> build + attach to the GitHub release.
+# Manual run  -> build only (artifacts land under the workflow run, no release touched).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # redactor imports nothing outside the standard library, so "does it work" is
+  # purely a question of Python version. 3.8 is the declared floor in
+  # packaging/nfpm.yaml and it is tested here, not assumed.
+  test:
+    name: test py${{ matrix.python-version }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.9', '3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # No pip install step, and that is the point: an empty requirements.txt
+      # is the whole reason this workflow is a fifth the size of sshscan's.
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v
+
+  # ONE build job, no matrix.
+  #
+  # sshscan needs a job per architecture because PyInstaller emits a native
+  # binary. redactor ships the .py file, so the package is arch: all (deb) /
+  # noarch (rpm) - one artifact installs on amd64, arm64 and anything else.
+  # That also deletes the almalinux:8 container, the glibc floor assert and the
+  # macOS build job: there is nothing to compile, so there is nothing to
+  # compile *against*.
+  build:
+    name: build packages
+    needs: test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # `go install` drops the binary in $HOME/go/bin, which is NOT on the
+      # runner's PATH -- without the GITHUB_PATH line this step still succeeds
+      # and the *next* one dies with "nfpm: command not found".
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          "$HOME/go/bin/nfpm" --version
+
+      - name: Build deb + rpm + tarball
+        run: |
+          set -eux
+          # Single source of truth, so the version is right for tag pushes and
+          # manual runs alike.
+          PKG_VERSION=$(python3 -c "import re;print(re.search(r\"__version__\s*=\s*'([^']+)'\", open('redactor.py').read()).group(1))")
+          export PKG_VERSION
+          echo "Packaging redactor $PKG_VERSION (noarch)"
+
+          mkdir -p dist out
+          # /usr/bin/redactor, not /usr/bin/redactor.py -- the shebang is
+          # already in the file, so this is a copy and a chmod, nothing more.
+          cp redactor.py dist/redactor
+          chmod +x dist/redactor
+
+          nfpm package -f packaging/nfpm.yaml -p deb -t out/
+          nfpm package -f packaging/nfpm.yaml -p rpm -t out/
+
+          # The tarball is for people who just want the file: unpack, run.
+          # It carries profiles/ because `-p webserver` resolves relative to the
+          # script when there is no system install.
+          tar -czf "out/redactor-${PKG_VERSION}.tar.gz" \
+            --transform "s,^,redactor-${PKG_VERSION}/," \
+            redactor.py profiles man completion \
+            README.md README_de.md LICENSE CHANGELOG.md redactor.conf.example
+          ls -lh out/
+
+      - name: Checksums
+        run: |
+          cd out
+          shasum -a 256 * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: redactor-packages
+          path: out/*
+          if-no-files-found: error
+
+  # "Should work on Debian" is not "does work on Debian". Installing via apt
+  # (not dpkg -i) is the point: it proves the declared python3 dependency
+  # actually resolves. The arm64 rows are cheap insurance that arch: all really
+  # is arch-independent -- the one claim this whole simplification rests on.
+  verify-deb:
+    name: deb ${{ matrix.image }} / ${{ matrix.os }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: 'debian:12', os: ubuntu-22.04}
+          - {image: 'debian:13', os: ubuntu-22.04}
+          - {image: 'ubuntu:22.04', os: ubuntu-22.04}
+          - {image: 'debian:12', os: ubuntu-22.04-arm}
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: redactor-packages
+
+      - name: Install and exercise
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y ./redactor_*_all.deb
+          command -v redactor
+          redactor --version
+          test -f /etc/redactor.conf
+
+          # the profiles must be findable at the installed path
+          redactor --list-profiles | grep -q webserver
+
+          # man page and completion: present at the paths the tools look in.
+          # dpkg compresses the man page on install, hence the glob.
+          ls /usr/share/man/man1/redactor.1*
+          test -f /usr/share/bash-completion/completions/redactor
+          bash -n /usr/share/bash-completion/completions/redactor
+
+          # end-to-end: a real redaction, not just --version
+          test "$(echo 'ping 192.168.1.50' | redactor -n -e '@ip')" = "ping 10.0.0.1"
+          test "$(echo 'robert' | redactor -n -e '@word robert user1')" = "user1"
+          echo 'GET /a?token=abc123' | redactor -n -p webserver | grep -q SECRET
+
+          apt-get remove -y redactor
+
+  # Same idea on the RPM side. dnf install (not rpm -i) so dependency
+  # resolution is exercised: python3 is spelled the same here, but the package
+  # metadata is not, and a broken Requires only shows up on install.
+  verify-rpm:
+    name: rpm ${{ matrix.image }} / ${{ matrix.os }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: 'rockylinux:9', os: ubuntu-22.04}
+          - {image: 'fedora:latest', os: ubuntu-22.04}
+          - {image: 'rockylinux:9', os: ubuntu-22.04-arm}
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: redactor-packages
+
+      - name: Install and exercise
+        run: |
+          set -eux
+          dnf install -y ./redactor-*.noarch.rpm
+          command -v redactor
+          redactor --version
+          test -f /etc/redactor.conf
+          redactor --list-profiles | grep -q webserver
+          ls /usr/share/man/man1/redactor.1*
+          test -f /usr/share/bash-completion/completions/redactor
+          bash -n /usr/share/bash-completion/completions/redactor
+          test "$(echo 'ping 192.168.1.50' | redactor -n -e '@ip')" = "ping 10.0.0.1"
+          echo 'GET /a?token=abc123' | redactor -n -p webserver | grep -q SECRET
+          dnf remove -y redactor
+
+  release:
+    name: Attach packages to release
+    needs: [build, verify-deb, verify-rpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+             --repo  "$GITHUB_REPOSITORY" \
+             --title "$GITHUB_REF_NAME" \
+             --notes "Verify downloads against \`SHA256SUMS\`.
+
+          **Packages**: one \`.deb\` and one \`.rpm\`, both architecture-independent (\`all\`/\`noarch\`) - redactor is pure Python and needs only the distro's \`python3\` (>= 3.8), no PyPI packages, no venv.
+          **Tarball**: unpack and run \`redactor.py\`, no install needed.
+          **macOS**: \`brew install rtulke/redactor/redactor\`
+
+          Tested on Debian 12/13, Ubuntu 22.04, Rocky 9 and Fedora, on amd64 and arm64." \
+             artifacts/* \
+          || gh release upload "$GITHUB_REF_NAME" artifacts/* \
+             --repo "$GITHUB_REPOSITORY" --clobber

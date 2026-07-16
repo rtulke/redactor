@@ -1,0 +1,67 @@
+# bash completion for redactor
+# Installed to /usr/share/bash-completion/completions/redactor
+
+_redactor() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    opts="-e --expr -f --file -p --profile --list-profiles
+          -a --ask -b --blank -k --keep-length
+          -i --in-place -d --diff -c --check -A --audit
+          -m --map -u --unredact
+          -s --stats -l --list-rules -n --no-config
+          -V --version -h --help"
+
+    # The @builtins are the part nobody remembers; the literal form needs no help.
+    # Kept in sync with redactor.BUILTINS by
+    # tests/test_redactor.py::Meta::test_completion_offers_every_builtin.
+    # @url is an alias for @uri -- listed because it is accepted, and completion
+    # should offer what the parser takes, not what we wish it took.
+    local builtins="@ip @ipv6 @email @mac @hostname @user @uri @url @path
+                    @sshkey @phone @secret @word @keep @block"
+
+    case "$prev" in
+        -p|--profile)
+            # Ask redactor itself rather than globbing a hardcoded directory:
+            # this way profiles in ~/.config/redactor/profiles show up too, and
+            # the list cannot drift from what --profile actually accepts.
+            # The '<-' filter skips the "(no profiles found ...)" line.
+            local profiles
+            profiles=$(redactor --list-profiles 2>/dev/null | awk '/<-/ {print $1}')
+            mapfile -t COMPREPLY < <(compgen -W "${profiles}" -- "${cur}")
+            return 0
+            ;;
+        -f|--file|-m|--map)
+            mapfile -t COMPREPLY < <(compgen -f -- "${cur}")
+            return 0
+            ;;
+        -e|--expr)
+            mapfile -t COMPREPLY < <(compgen -W "${builtins}" -- "${cur}")
+            return 0
+            ;;
+        -V|--version|-h|--help|-l|--list-rules|--list-profiles)
+            return 0  # these take nothing and end the command
+            ;;
+    esac
+
+    # A rule may also be typed unquoted after -e, in which case the @builtin is
+    # the current word rather than the one after the flag.
+    if [[ "${cur}" == @* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "${builtins}" -- "${cur}")
+        return 0
+    fi
+
+    if [[ "${cur}" == -* ]]; then
+        mapfile -t COMPREPLY < <(compgen -W "${opts}" -- "${cur}")
+        return 0
+    fi
+
+    # positional: input files
+    mapfile -t COMPREPLY < <(compgen -f -- "${cur}")
+    return 0
+}
+
+complete -F _redactor redactor
+complete -F _redactor redactor.py

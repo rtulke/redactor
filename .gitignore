@@ -1,0 +1,41 @@
+# The un-redaction key. Committing this hands over everything redactor was used
+# to hide, for every file it ever touched. Never in the repo.
+.redactor.map
+*.redactor.map
+.redactor.map.tmp
+
+# Leftovers from an interrupted -i run
+*.redactor.tmp
+
+# A local .redactor may hold real customer names, hostnames and paths - that is
+# the point of it. The shareable template is redactor.conf.example.
+.redactor
+
+# KI
+CLAUDE.md
+AGENTS.md
+
+# Build output
+dist/
+build/
+out/
+*.deb
+*.rpm
+*.tar.gz
+SHA256SUMS*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store

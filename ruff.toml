@@ -1,0 +1,34 @@
+# Deliberately narrow: rules that find bugs, not rules that have opinions.
+#
+# A lint job people start ignoring is worse than none, and the fastest way to
+# get there is a wall of style complaints. Everything selected below can fail
+# only for a real reason.
+
+line-length = 90
+target-version = "py38"   # the floor declared in packaging/nfpm.yaml
+
+[lint]
+select = [
+    "F",      # pyflakes: undefined names, unused imports/variables, bad
+              # f-strings. Actual bugs.
+    "E9",     # syntax and IO errors ruff cannot parse past.
+    "W605",   # invalid escape sequence in a string literal. Earns its place in
+              # a tool that is mostly regexes: "\d" in a non-raw string is a
+              # latent bug that Python warns about today and will reject later.
+    "B023",   # loop variable not bound in a closure. THE bug this codebase is
+              # shaped to invite: _builtin() and build_unredact_rules() hand out
+              # lambdas from inside loops, and every one of them binds via a
+              # default argument (lambda m, r=repl: r). Miss that once and every
+              # rule silently gets the last loop iteration's replacement.
+]
+# Whole rule families are not selected on purpose. Not selecting "E" avoids
+# E501 (the comments here are long deliberately) and E731 (rule.repl is
+# reassigned to a lambda by design, in wrap_for_blank/_ask/_keep_length). Not
+# selecting all of "B" keeps the set to rules that were actually audited against
+# this code, rather than ~50 that might have opinions about it.
+# Widen it once you have watched a run go green.
+
+[lint.per-file-ignores]
+# tests must insert the repo root into sys.path before importing redactor, so
+# the import cannot be at the top.
+"tests/*" = ["E402"]
