@@ -17,6 +17,11 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   matches, `/regex/` when needed, `@block` for multi-line markers.
 - **Classes**: `@ip`, `@ipv6`, `@email`, `@mac`, `@hostname`, `@user`, `@uri`,
   `@path`, `@sshkey`, `@phone`, `@secret`, `@keep`.
+- **`@hostname` / `@user` take `/regex/` patterns**, mixed with plain names:
+  `@hostname web01 /ge[0-9]{3}/`. For a fleet with a naming scheme, where
+  listing every machine means the next one leaks. Unlike a plain regex rule,
+  matches still go through the mapping, so the pseudonyms stay stable and
+  distinct instead of collapsing to one fixed replacement.
 - **Stable pseudonyms**: the same value always becomes the same placeholder, so
   a redacted log still shows that two lines concern the same client. `--map`
   keeps that mapping consistent across runs and files; `--unredact` reverses it.
@@ -30,6 +35,10 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Modes**: `--ask` (y/n/a per change, over `/dev/tty` so it works mid-pipe),
   `--blank`, `--keep-length`, `--in-place` (atomic, preserves mode),
   `--diff`, `--check` (exit 1, for pre-commit hooks), `--stats`, `--list-rules`.
+- **`--color`** (`auto`/`always`/`never`, honours `NO_COLOR` and `TERM=dumb`):
+  colours `--diff` and inverts the characters that actually differ within a
+  line. Whole-line red/green tells you a 200-character log line changed, not
+  what changed in it.
 - **Speed**: every rule carries a literal gate, so a rule that cannot match is
   skipped without running its regex.
 

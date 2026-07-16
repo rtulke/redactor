@@ -31,8 +31,10 @@ Rule syntax (one rule per line; also used as the value for -e):
     @mac                                 # every MAC addr -> 02:00:00:xx:xx:xx
     @hostname                            # this host's names -> hostN
     @hostname web01 db01.corp.local      # only these hostnames -> hostN
+    @hostname /ge[0-9]{3}/               # a whole fleet by pattern -> hostN
     @user                                # current username -> userN
     @user robert alice                   # only these usernames -> userN
+    @user /svc-.*/                       # ...or by pattern -> userN
     @uri                                 # scheme://host/path -> scheme://hostN/path
     @path                                # /home/alice/... -> /home/user1/...
     @path /home/alice/myproject/ PROJECT/  # literal prefix, no regex ambiguity
@@ -703,18 +705,71 @@ def _regex_token(token, what):
     raise ValueError("%s must be a /regex/, got %r" % (what, token))
 
 
+def _split_ident_args(args, what):
+    """Separate plain names from /regex/ patterns, validating the latter."""
+    literals, patterns = [], []
+    for arg in args:
+        if len(arg) >= 2 and arg.startswith("/") and arg.endswith("/"):
+            body = arg[1:-1]
+            try:
+                re.compile(body)
+            except re.error as exc:
+                raise ValueError("%s: bad regex %s: %s" % (what, arg, exc))
+            patterns.append(body)
+        elif arg:
+            literals.append(arg)
+    return literals, patterns
+
+
 def _ident_rule(label, category, values, fmt, source):
-    """Word-bounded alternation over `values`, each mapped stably via fmt."""
-    values = [v for v in dict.fromkeys(values) if v]
-    if not values:
+    """Word-bounded matcher over `values`, each mapped stably via fmt.
+
+    `values` may mix plain names with /regex/ patterns:
+
+        @hostname web01 db01 /ge[0-9]{3}/
+
+    Patterns exist for fleets with a naming scheme, where listing every machine
+    means the next new one leaks.  A plain regex rule could match them too, but
+    it would hand every host the same fixed replacement - here they keep going
+    through the mapper, so host1/host2/host3 stay stable and you can still see
+    which lines concern the same machine.
+
+    Literals and patterns become TWO rules sharing ONE mapper.  They cannot be
+    merged: a literal is its own gate (see Rule), while a regex has no character
+    that must be present, so it cannot be gated at all.  Merging them would mean
+    either dropping the gate for the literals - slow - or inventing a gate for
+    the pattern - a silent leak.  Same category, so the pseudonyms agree either
+    way."""
+    literals, patterns = _split_ident_args(values, label)
+    if not literals and not patterns:
         return []
-    # longest first so fqdn wins over short host, "robert" over "rob", etc.
-    values.sort(key=len, reverse=True)
-    pattern = _bounded("|".join(re.escape(v) for v in values))
-    gates = tuple(v.lower() for v in values)  # the values are their own gate
-    return [
-        Rule(label, re.compile(pattern), STORE.mapper(category, fmt), source, gates)
-    ]
+
+    mapper = STORE.mapper(category, fmt)
+    rules = []
+
+    if literals:
+        literals = list(dict.fromkeys(literals))
+        # longest first so fqdn wins over short host, "robert" over "rob", etc.
+        literals.sort(key=len, reverse=True)
+        rules.append(Rule(
+            label,
+            re.compile(_bounded("|".join(re.escape(v) for v in literals))),
+            mapper,
+            source,
+            tuple(v.lower() for v in literals),  # the values are their own gate
+        ))
+
+    if patterns:
+        patterns = list(dict.fromkeys(patterns))
+        rules.append(Rule(
+            "%s %s" % (label, " ".join("/%s/" % p for p in patterns)),
+            re.compile(_bounded("|".join("(?:%s)" % p for p in patterns))),
+            mapper,
+            source,
+            None,  # deliberately ungated; see the docstring
+        ))
+
+    return rules
 
 
 def _uri_repl(mapper):
@@ -1192,6 +1247,133 @@ def _blank_line(line):
 
 
 # --------------------------------------------------------------------------
+# coloured --diff
+# --------------------------------------------------------------------------
+
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_CYAN = "\033[36m"
+_BOLD = "\033[1m"
+_INVERT = "\033[7m"
+_INVERT_OFF = "\033[27m"  # inverse off only, so the line's red/green survives
+_RESET = "\033[0m"
+
+
+def want_color(choice, stream):
+    """auto = only when a human is actually looking at a terminal."""
+    if choice == "always":
+        return True
+    if choice == "never":
+        return False
+    if os.environ.get("NO_COLOR"):  # no-color.org: set and non-empty
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _paint(colour, line):
+    """Colour a line, keeping the reset BEFORE the newline.
+
+    Resetting after the newline makes terminals paint the rest of the row,
+    which is very visible with inverse video."""
+    body = line.rstrip("\n")
+    return colour + body + _RESET + line[len(body):]
+
+
+def _mark_spans(old, new):
+    """Invert only the characters that actually differ between two lines.
+
+    autojunk=False matters: SequenceMatcher's heuristic writes off 'popular'
+    elements on sequences longer than 200 characters, and a log line is mostly
+    spaces. With it on, long lines get nonsense spans."""
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    o, n = [], []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            o.append(old[i1:i2])
+            n.append(new[j1:j2])
+            continue
+        if i2 > i1:
+            o.append(_INVERT + old[i1:i2] + _INVERT_OFF)
+        if j2 > j1:
+            n.append(_INVERT + new[j1:j2] + _INVERT_OFF)
+    return "".join(o), "".join(n)
+
+
+def _emit_change(minus, plus, write):
+    if len(minus) != len(plus):
+        # No 1:1 pairing exists - a @block collapsing five lines into one gets
+        # here. Nothing sensible to align, so plain line colours.
+        for line in minus:
+            write(_paint(_RED, line))
+        for line in plus:
+            write(_paint(_GREEN, line))
+        return
+
+    pairs = []
+    for old, new in zip(minus, plus):
+        old_body, new_body = old.rstrip("\n"), new.rstrip("\n")
+        o, n = _mark_spans(old_body[1:], new_body[1:])  # drop the -/+ prefix
+        pairs.append((
+            _RED + "-" + o + _RESET + old[len(old_body):],
+            _GREEN + "+" + n + _RESET + new[len(new_body):],
+        ))
+    # all minus, then all plus: keep the output a structurally valid unified
+    # diff rather than interleaving the pairs
+    for old, _ in pairs:
+        write(old)
+    for _, new in pairs:
+        write(new)
+
+
+def emit_diff(original, out, name, write, colour):
+    """Unified diff, optionally with the changed span within a line inverted.
+
+    Whole-line red/green is nearly useless on a log: in a 200-character line
+    where one IP moved, you can see that something changed but not what. So
+    equal-length -/+ runs are re-diffed per character and only the parts that
+    really differ are marked."""
+    diff = list(difflib.unified_diff(
+        original, out, fromfile=name, tofile=name + " (redacted)"
+    ))
+    if not colour:
+        write("".join(diff))
+        return
+
+    i, n = 0, len(diff)
+    while i < n:
+        line = diff[i]
+        # unified_diff always emits ---/+++ first, so this is positional: a
+        # content line may legitimately start with --- too
+        if i < 2 and (line.startswith("---") or line.startswith("+++")):
+            write(_paint(_BOLD, line))
+            i += 1
+        elif line.startswith("@@"):
+            write(_paint(_CYAN, line))
+            i += 1
+        elif line.startswith("-"):
+            minus = []
+            while i < n and diff[i].startswith("-"):
+                minus.append(diff[i])
+                i += 1
+            plus = []
+            while i < n and diff[i].startswith("+"):
+                plus.append(diff[i])
+                i += 1
+            _emit_change(minus, plus, write)
+        elif line.startswith("+"):
+            write(_paint(_GREEN, line))
+            i += 1
+        else:
+            write(line)  # context
+            i += 1
+
+
+# --------------------------------------------------------------------------
 
 
 def _reset_state():
@@ -1264,6 +1446,13 @@ def main(argv=None):
     parser.add_argument(
         "-d", "--diff", action="store_true",
         help="show a unified diff of what would change, write no output",
+    )
+    parser.add_argument(
+        "--color", "--colour", choices=("auto", "always", "never"), default="auto",
+        metavar="WHEN",
+        help="colorize --diff and mark the changed span within a line: "
+             "auto (default, only on a terminal), always, never. "
+             "NO_COLOR is honoured",
     )
     parser.add_argument(
         "-c", "--check", action="store_true",
@@ -1399,8 +1588,8 @@ def main(argv=None):
                 if write_back(path, original, out):
                     changed += 1
         elif args.diff:
-            sources = args.files or [None]
-            for path in sources:
+            colour = want_color(args.color, sys.stdout)
+            for path in args.files or [None]:
                 if path is None:
                     original = sys.stdin.readlines()
                     out = []
@@ -1409,11 +1598,7 @@ def main(argv=None):
                 else:
                     original, out = run_buffered(path)
                     name = path
-                sys.stdout.writelines(
-                    difflib.unified_diff(
-                        original, out, fromfile=name, tofile=name + " (redacted)"
-                    )
-                )
+                emit_diff(original, out, name, sys.stdout.write, colour)
         elif args.check or args.audit:
             # both are dry runs over the stream; --check only wants the counters,
             # --audit inspects what came out the far end

@@ -278,8 +278,8 @@ Erkennen eine ganze Kategorie und vergeben pro distinktem Wert ein **stabiles** 
 | `@ip` | jede IPv4/IPv6 → `10.0.0.1`, `fd00::1` |
 | `@email` | jede Mail-Adresse → `redacted1@example.com` |
 | `@mac` | jede MAC → `02:00:00:00:00:01` |
-| `@hostname` | eigener Hostname → `host1`. Mit Argumenten: `@hostname web01 db01` |
-| `@user` | aktueller User → `user1`. Mit Argumenten: `@user robert alice` |
+| `@hostname` | eigener Hostname → `host1`. Mit Argumenten: `@hostname web01 /ge[0-9]{3}/` |
+| `@user` | aktueller User → `user1`. Mit Argumenten: `@user robert /svc-.*/` |
 | `@uri` | `https://git.corp/x?token=a` → `https://host1/x` |
 | `@path` | `/home/alice/...` → `/home/user1/...`. Mit Argumenten: Prefix-Ersatz |
 | `@sshkey` | `SHA256:47DEQ...`, `ssh-rsa AAAA...` → `sshkey1` |
@@ -288,6 +288,38 @@ Erkennen eine ganze Kategorie und vergeben pro distinktem Wert ein **stabiles** 
 | `@keep` | Gegenteil: diese Werte **nie** ersetzen |
 
 `@hostname`, `@user` und `@sshkey` sind **automatisch wortgebunden**.
+
+### Namen oder Muster
+
+`@hostname` und `@user` nehmen Klarnamen, `/regex/`-Muster oder beides gemischt:
+
+```
+@hostname web01 db01.corp.local /ge[0-9]{3}/
+@user robert /svc-.*/
+```
+
+Ein Muster ist für eine **Flotte mit Namensschema** gedacht — dort bedeutet
+Einzelauflistung, dass die nächste neu gerackte Maschine beim ersten Auftauchen im
+Log leakt, und du erfährst es hinterher.
+
+Warum nicht einfach eine Regex-Regel? Weil `/ge[0-9]{3}/ HOST` **jede** Maschine
+`HOST` nennen würde. Ein Muster hier läuft weiterhin durch das Mapping:
+
+```
+Regel:   @hostname /ge[0-9]{3}/
+
+  ge208.naz.ch  ->  host1.naz.ch
+  ge113.naz.ch  ->  host2.naz.ch
+  ge208.naz.ch  ->  host1.naz.ch     ← wieder die 1
+```
+
+Damit bleibt genau das erhalten, wofür man redactor statt `sed` nimmt: du siehst
+weiterhin, welche Zeilen dieselbe Maschine betreffen — ohne zu wissen, welche.
+
+Namen und Muster teilen sich **eine** Mapping-Tabelle, `@hostname web01 /ge[0-9]{3}/`
+nummeriert also in einer Folge durch. Intern werden zwei Regeln daraus — ein Literal
+ist sein eigenes billiges Gate, ein Regex lässt sich gar nicht gaten (siehe
+[Geschwindigkeit](#geschwindigkeit)) — sichtbar ist das nur in `--list-rules`.
 
 **Stabil heisst:** derselbe Wert wird zum selben Pseudonym.
 
@@ -471,6 +503,7 @@ bleibt der Rest redigiert — im Zweifel zu viel.
 | `-k`, `--keep-length` | Ersatz mit Leerzeichen auf Originallänge auffüllen |
 | `-i`, `--in-place` | Dateien direkt umschreiben |
 | `-d`, `--diff` | Unified Diff der Änderungen, keine Ausgabe |
+| `--color WHEN` | `auto` (Default) / `always` / `never` — färbt den Diff und markiert die geänderte Stelle |
 | `-c`, `--check` | nur prüfen, Exit 1 bei Treffern |
 | `-A`, `--audit` | melden, was verdächtig aussieht und keine Regel hat |
 | `-m PATH`, `--map` | Mapping persistent halten |
@@ -483,6 +516,38 @@ bleibt der Rest redigiert — im Zweifel zu viel.
 
 `-i`, `-d`, `-c` und `-A` schliessen sich gegenseitig aus. `-V` ist gross, damit `-v`
 für ein späteres `--verbose` frei bleibt; `-A` ist gross, weil `-a` schon `--ask` ist.
+
+## `-d` / `--diff` und `--color`
+
+```bash
+redactor -d access.log            # Farbe, wenn es ein Terminal ist
+redactor -d access.log | less -R  # -R lässt less die Escapes durch
+redactor -d --color=never access.log > review.patch
+```
+
+Ganze Zeilen rot/grün nützen bei einem Log wenig: in einer 200-Zeichen-Zeile, in der
+sich eine IP bewegt hat, siehst du *dass* sich was geändert hat, aber nicht *was*.
+Deshalb werden die `-`/`+`-Paare ein zweites Mal zeichenweise verglichen, und nur die
+Zeichen, die sich wirklich unterscheiden, werden invertiert:
+
+```
+--- access.log
++++ access.log (redacted)
+@@ -1,2 +1,2 @@
+-Jul 16 13:56:56 ge208.naz.ch sshd[2764440]: Accepted publickey for turo from 10.0.10.113
++Jul 16 13:56:56 host1.example.com sshd[2764440]: Accepted publickey for user1 from 10.0.0.1
+                 ^^^^^^^^^^^^^^^^                                          ^^^^^     ^^^^^^^^
+                 invertiert, der Rest der Zeile ist schlicht rot / grün
+```
+
+`auto` färbt nur, wenn stdout ein Terminal ist — eine Umleitung in eine Datei oder eine
+Pipe nach `patch` bleibt also sauber. `NO_COLOR` (gesetzt und nicht leer) und `TERM=dumb`
+schalten `auto` ab; ein explizites `--color=always` schlägt beide — eine Umgebungsvariable
+soll nicht überstimmen, was du auf der Kommandozeile getippt hast.
+
+Die Zeilenzahl bleibt 1:1, ausser bei `@block`, das viele Zeilen zu einer zusammenfasst.
+Dafür gibt es keine sinnvolle zeichenweise Zuordnung — solche Hunks bekommen schlichte
+Zeilenfarben.
 
 ## `-A` / `--audit` — "was hab ich vergessen?"
 

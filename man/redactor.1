@@ -84,7 +84,18 @@ so a crash never leaves a half-redacted file; file modes are preserved and
 files with no matches are not touched at all.
 .TP
 .BR \-d ", " \-\-diff
-Show a unified diff of what would change. Writes no redacted output.
+Show a unified diff of what would change. Writes no redacted output. See
+.B \-\-color
+for how the changed part of a line is marked.
+.TP
+.BR \-\-color ", " \-\-colour " \fIWHEN\fR"
+\fBauto\fR (default), \fBalways\fR or \fBnever\fR. Colours the
+.B \-\-diff
+output and, more usefully, inverts the characters that actually differ within a
+line: whole-line red and green says something changed in a 200-character log
+line, not what. \fBauto\fR means only when standard output is a terminal, so a
+redirect or a pipe stays clean. \fB$NO_COLOR\fR (when set and non-empty) and
+\fBTERM=dumb\fR switch \fBauto\fR off; an explicit \fBalways\fR overrides them.
 .TP
 .BR \-c ", " \-\-check
 Report what would be replaced and exit 1 on any match. Writes no output.
@@ -174,11 +185,17 @@ Every address \(-> \fBredacted1@example.com\fR
 Every MAC \(-> \fB02:00:00:00:00:01\fR (a locally administered range, so the
 pseudonym's OUI means nothing)
 .TP
-.BR @hostname " [\fINAME\fR...]"
-Without arguments, this host's own names \(-> \fBhost1\fR
+.BR @hostname " [\fINAME\fR|\fI/REGEX/\fR...]"
+Without arguments, this host's own names \(-> \fBhost1\fR. Arguments may be
+plain names, \fI/regex/\fR patterns, or both:
+\fB@hostname web01 /ge[0-9]{3}/\fR. A pattern is for a fleet with a naming
+scheme, where listing every machine means the next one leaks. Unlike a plain
+regex rule, matches still go through the mapping, so \fBhost1\fR and
+\fBhost2\fR stay stable and distinct.
 .TP
-.BR @user " [\fINAME\fR...]"
-Without arguments, the current user \(-> \fBuser1\fR
+.BR @user " [\fINAME\fR|\fI/REGEX/\fR...]"
+Without arguments, the current user \(-> \fBuser1\fR. Takes patterns the same
+way: \fB@user /svc-.*/\fR
 .TP
 .B @uri
 \fBhttps://git.corp/x?token=a\fR \(-> \fBhttps://host1/x\fR. Scheme, port and

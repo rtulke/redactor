@@ -278,8 +278,8 @@ These detect a whole category and assign a **stable** pseudonym per distinct val
 | `@ip` | every IPv4/IPv6 → `10.0.0.1`, `fd00::1` |
 | `@email` | every address → `redacted1@example.com` |
 | `@mac` | every MAC → `02:00:00:00:00:01` |
-| `@hostname` | this host's names → `host1`. With arguments: `@hostname web01 db01` |
-| `@user` | current user → `user1`. With arguments: `@user robert alice` |
+| `@hostname` | this host's names → `host1`. With arguments: `@hostname web01 /ge[0-9]{3}/` |
+| `@user` | current user → `user1`. With arguments: `@user robert /svc-.*/` |
 | `@uri` | `https://git.corp/x?token=a` → `https://host1/x` |
 | `@path` | `/home/alice/...` → `/home/user1/...`. With arguments: prefix replacement |
 | `@sshkey` | `SHA256:47DEQ...`, `ssh-rsa AAAA...` → `sshkey1` |
@@ -288,6 +288,38 @@ These detect a whole category and assign a **stable** pseudonym per distinct val
 | `@keep` | the opposite: **never** replace these values |
 
 `@hostname`, `@user` and `@sshkey` are **word-bounded automatically**.
+
+### Names or patterns
+
+`@hostname` and `@user` take plain names, `/regex/` patterns, or a mix:
+
+```
+@hostname web01 db01.corp.local /ge[0-9]{3}/
+@user robert /svc-.*/
+```
+
+A pattern is for a **fleet with a naming scheme**, where listing every machine
+means the next one someone racks leaks the first time it appears in a log — and
+you find out afterwards.
+
+Why not just a regex rule? Because `/ge[0-9]{3}/ HOST` would call every machine
+`HOST`. A pattern here still goes through the mapping:
+
+```
+Rule:   @hostname /ge[0-9]{3}/
+
+  ge208.naz.ch  ->  host1.naz.ch
+  ge113.naz.ch  ->  host2.naz.ch
+  ge208.naz.ch  ->  host1.naz.ch     <- the 1 again
+```
+
+So you keep the thing that makes redactor worth using over `sed`: you can still
+see which lines concern the same machine, without knowing which one.
+
+Names and patterns share one mapping table, so `@hostname web01 /ge[0-9]{3}/`
+numbers them in one sequence. Internally they become two rules — a literal is
+its own cheap gate, a regex cannot be gated at all (see [Speed](#speed)) — but
+that is invisible except in `--list-rules`.
 
 **Stable means:** the same value always becomes the same pseudonym.
 
@@ -471,6 +503,7 @@ the remainder stays redacted — when in doubt, too much.
 | `-k`, `--keep-length` | pad the replacement with spaces to the original length |
 | `-i`, `--in-place` | rewrite the files directly |
 | `-d`, `--diff` | unified diff of the changes, no output |
+| `--color WHEN` | `auto` (default) / `always` / `never` — colours the diff and marks the changed span |
 | `-c`, `--check` | check only, exit 1 on any match |
 | `-A`, `--audit` | report what looks sensitive and has no rule |
 | `-m PATH`, `--map` | keep the mapping persistent |
@@ -483,6 +516,38 @@ the remainder stays redacted — when in doubt, too much.
 
 `-i`, `-d`, `-c` and `-A` are mutually exclusive. `-V` is uppercase so `-v` stays free
 for a future `--verbose`; `-A` is uppercase because `-a` is already `--ask`.
+
+## `-d` / `--diff` and `--color`
+
+```bash
+redactor -d access.log            # colour when it is a terminal
+redactor -d access.log | less -R  # -R makes less pass the escapes through
+redactor -d --color=never access.log > review.patch
+```
+
+Whole-line red and green is close to useless on a log: in a 200-character line
+where one IP moved, you can see that *something* changed but not *what*. So the
+`-`/`+` pairs are diffed a second time per character, and only the characters
+that actually differ are inverted:
+
+```
+--- access.log
++++ access.log (redacted)
+@@ -1,2 +1,2 @@
+-Jul 16 13:56:56 ge208.naz.ch sshd[2764440]: Accepted publickey for turo from 10.0.10.113
++Jul 16 13:56:56 host1.example.com sshd[2764440]: Accepted publickey for user1 from 10.0.0.1
+                 ^^^^^^^^^^^^^^^^                                          ^^^^^     ^^^^^^^^
+                 inverted, the rest of the line is plain red / green
+```
+
+`auto` colours only when stdout is a terminal, so redirecting to a file or
+piping into `patch` stays clean. `NO_COLOR` (set and non-empty) and `TERM=dumb`
+turn `auto` off; an explicit `--color=always` overrides both — an environment
+variable should not veto what you typed on the command line.
+
+Line counts stay 1:1 except for `@block`, which collapses many lines into one.
+There is no sensible character-level pairing for that, so those hunks get plain
+line colours.
 
 ## `-A` / `--audit` — "what did I forget?"
 

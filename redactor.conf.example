@@ -39,11 +39,20 @@ hunter2
 @hostname
 # ...or name them explicitly (matched as whole words):
 #@hostname web01 db01.corp.local
+# ...or by pattern, for a fleet with a naming scheme. Listing machines one by
+# one means the next one racked leaks the first time it hits a log. Unlike a
+# plain /regex/ rule, matches still go through the mapping, so ge113 -> host1
+# and ge208 -> host2 stay stable and distinct:
+#@hostname /ge[0-9]{3}/
+# Names and patterns mix, and share one numbering sequence:
+#@hostname web01 /ge[0-9]{3}/
 
 # Without arguments the current username is used:
 @user
 # ...or name them explicitly (matched as whole words):
 #@user robert alice bob
+# ...or by pattern, e.g. for service accounts:
+#@user /svc-.*/
 
 # URLs: https://git.corp.local/team/x?token=abc -> https://host1/team/x
 # Keeps scheme/port/path, pseudonymizes the host (same table as @hostname),

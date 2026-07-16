@@ -143,6 +143,63 @@ class Classes(unittest.TestCase):
         self.assertEqual(out, "host1 and https://host1/x")
 
 
+class IdentPatterns(unittest.TestCase):
+    """@hostname / @user given a /regex/ instead of a list of names."""
+
+    def test_hostname_by_pattern(self):
+        self.assertEqual(redact(["@hostname /ge[0-9]{3}/"], "ge208"), "host1")
+
+    def test_pattern_is_word_bounded(self):
+        for text in ("xge208", "ge2085", "ge208x"):
+            self.assertEqual(redact(["@hostname /ge[0-9]{3}/"], text), text, text)
+
+    def test_pattern_stops_at_the_domain(self):
+        # the real case this was built for: sshd logs the fqdn
+        self.assertEqual(
+            redact(["@hostname /ge[0-9]{3}/"], "ge208.naz.ch"), "host1.naz.ch"
+        )
+
+    def test_pattern_pseudonyms_are_stable(self):
+        _, out, _ = run(
+            ["-n", "-e", "@hostname /ge[0-9]{3}/"], "ge208\nge113\nge208\n"
+        )
+        # the whole point over a plain /regex/ rule: same host, same placeholder,
+        # different hosts stay distinguishable
+        self.assertEqual(out, "host1\nhost2\nhost1\n")
+
+    def test_literals_and_patterns_share_one_mapping(self):
+        out = redact(["@hostname web01 /ge[0-9]{3}/"], "web01 and ge208")
+        self.assertEqual(out, "host1 and host2")
+
+    def test_user_by_pattern(self):
+        self.assertEqual(redact(["@user /svc-.*/"], "svc-deploy"), "user1")
+
+    def test_pattern_matching_our_own_placeholder_is_idempotent(self):
+        # A pattern broad enough to hit host1 must not remap it to host2. This
+        # only bites with a persisted map: re.subn does one pass and never
+        # re-scans what it just wrote, so within a single run the placeholder is
+        # never re-examined. Across runs, Mapper._used is the only thing
+        # standing between you and host1 -> host2 -> host3 on every pass.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        mapfile = os.path.join(tmp.name, "m.json")
+        rule = "@hostname /host[0-9]+|ge[0-9]{3}/"
+
+        _, first, _ = run(["-n", "-m", mapfile, "-e", rule], "ge208\n")
+        self.assertEqual(first, "host1\n")
+
+        _, second, _ = run(["-n", "-m", mapfile, "-e", rule], first)
+        self.assertEqual(second, "host1\n")
+
+    def test_bad_pattern_is_reported(self):
+        code, _, err = run(["-n", "-e", "@hostname /ge[0-9/"], "x\n")
+        self.assertIn("bad regex", err)
+
+    def test_pattern_survives_a_second_run(self):
+        once = redact(["@hostname /ge[0-9]{3}/"], "ge208")
+        self.assertEqual(redact(["@hostname /ge[0-9]{3}/"], once), once)
+
+
 class Secrets(unittest.TestCase):
     def test_query_param(self):
         # the common web-server leak: no scheme, so @uri never sees it
@@ -317,6 +374,96 @@ class Modes(unittest.TestCase):
         code, _, err = run(["-n", "-c", "-d"], "x\n")
         self.assertEqual(code, 2)
         self.assertIn("cannot be combined", err)
+
+
+class _FakeTty:
+    """A stream that claims to be a terminal.
+
+    want_color() must be tested against this, never against the real sys.stdout:
+    under ./test.sh in a shell that IS a tty, under CI it is not, so a test using
+    it would pass for the wrong reason in exactly one of the two places."""
+
+    def isatty(self):
+        return True
+
+
+class Colour(unittest.TestCase):
+    """--diff colours. The span boundaries themselves are deliberately not
+    asserted: SequenceMatcher may split "robert"/"user1" differently without
+    the feature being broken, and pinning that down would only be brittle."""
+
+    def setUp(self):
+        # the suite must not inherit the developer's NO_COLOR
+        self._env = dict(os.environ)
+        os.environ.pop("NO_COLOR", None)
+        os.environ.pop("TERM", None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def diff(self, *extra):
+        _, out, _ = run(
+            ["-n", "-e", "@word robert user1", "-d"] + list(extra),
+            "hello robert bye\n",
+        )
+        return out
+
+    def test_never_has_no_escapes(self):
+        self.assertNotIn("\033[", self.diff("--color=never"))
+
+    def test_always_paints_the_lines(self):
+        out = self.diff("--color=always")
+        self.assertIn("\033[31m", out)  # removed
+        self.assertIn("\033[32m", out)  # added
+
+    def test_always_marks_the_changed_span(self):
+        # the whole point: not the line, the part of it that moved
+        self.assertIn("\033[7m", self.diff("--color=always"))
+
+    def test_unchanged_text_is_not_marked(self):
+        out = self.diff("--color=always")
+        # "hello " is identical on both sides, so it must sit outside any span
+        self.assertIn("\033[31m-hello ", out)
+
+    def test_auto_off_when_not_a_terminal(self):
+        # run() hands main a StringIO, which is not a tty - so a redirect to a
+        # file or a pipe into less must not get escape codes
+        self.assertNotIn("\033[", self.diff())
+        self.assertNotIn("\033[", self.diff("--color=auto"))
+
+    def test_no_color_env_wins_over_auto(self):
+        os.environ["NO_COLOR"] = "1"
+        self.assertNotIn("\033[", self.diff("--color=auto"))
+
+    def test_empty_no_color_is_ignored(self):
+        # no-color.org: set AND non-empty. Empty means "not set".
+        # Checked against "auto", not "always": always short-circuits to True
+        # before NO_COLOR is ever looked at, so it would prove nothing here.
+        os.environ["NO_COLOR"] = ""
+        self.assertTrue(redactor.want_color("auto", _FakeTty()))
+
+    def test_explicit_always_beats_no_color(self):
+        # an env var must not override what the user typed on the line
+        os.environ["NO_COLOR"] = "1"
+        self.assertIn("\033[31m", self.diff("--color=always"))
+
+    def test_term_dumb_disables_auto(self):
+        os.environ["TERM"] = "dumb"
+        self.assertFalse(redactor.want_color("auto", _FakeTty()))
+
+    def test_auto_on_when_it_is_a_terminal(self):
+        # the positive case, or every "auto is off" test above could be passing
+        # because want_color always says no
+        self.assertTrue(redactor.want_color("auto", _FakeTty()))
+
+    def test_colour_spelling_is_accepted(self):
+        self.assertNotIn("\033[", self.diff("--colour=never"))
+
+    def test_plain_diff_content_is_unchanged(self):
+        out = self.diff("--color=never")
+        self.assertIn("-hello robert bye", out)
+        self.assertIn("+hello user1 bye", out)
 
 
 class MapAndUnredact(unittest.TestCase):
