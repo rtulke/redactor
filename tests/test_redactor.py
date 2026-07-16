@@ -387,8 +387,8 @@ class _FakeTty:
         return True
 
 
-class Colour(unittest.TestCase):
-    """--diff colours. The span boundaries themselves are deliberately not
+class Color(unittest.TestCase):
+    """--diff colors. The span boundaries themselves are deliberately not
     asserted: SequenceMatcher may split "robert"/"user1" differently without
     the feature being broken, and pinning that down would only be brittle."""
 

@@ -503,7 +503,7 @@ the remainder stays redacted — when in doubt, too much.
 | `-k`, `--keep-length` | pad the replacement with spaces to the original length |
 | `-i`, `--in-place` | rewrite the files directly |
 | `-d`, `--diff` | unified diff of the changes, no output |
-| `--color WHEN` | `auto` (default) / `always` / `never` — colours the diff and marks the changed span |
+| `--color WHEN` | `auto` (default) / `always` / `never` — colors the diff and marks the changed span |
 | `-c`, `--check` | check only, exit 1 on any match |
 | `-A`, `--audit` | report what looks sensitive and has no rule |
 | `-m PATH`, `--map` | keep the mapping persistent |
@@ -520,7 +520,7 @@ for a future `--verbose`; `-A` is uppercase because `-a` is already `--ask`.
 ## `-d` / `--diff` and `--color`
 
 ```bash
-redactor -d access.log            # colour when it is a terminal
+redactor -d access.log            # color when it is a terminal
 redactor -d access.log | less -R  # -R makes less pass the escapes through
 redactor -d --color=never access.log > review.patch
 ```
@@ -540,14 +540,14 @@ that actually differ are inverted:
                  inverted, the rest of the line is plain red / green
 ```
 
-`auto` colours only when stdout is a terminal, so redirecting to a file or
+`auto` colors only when stdout is a terminal, so redirecting to a file or
 piping into `patch` stays clean. `NO_COLOR` (set and non-empty) and `TERM=dumb`
 turn `auto` off; an explicit `--color=always` overrides both — an environment
 variable should not veto what you typed on the command line.
 
 Line counts stay 1:1 except for `@block`, which collapses many lines into one.
 There is no sensible character-level pairing for that, so those hunks get plain
-line colours.
+line colors.
 
 ## `-A` / `--audit` — "what did I forget?"
 

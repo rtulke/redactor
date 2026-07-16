@@ -1247,7 +1247,10 @@ def _blank_line(line):
 
 
 # --------------------------------------------------------------------------
-# coloured --diff
+# colored --diff
+#
+# American spelling throughout, to match the --color flag and want_color().
+# --colour is accepted on the command line as an alias, and nowhere else.
 # --------------------------------------------------------------------------
 
 _RED = "\033[31m"
@@ -1275,13 +1278,13 @@ def want_color(choice, stream):
         return False
 
 
-def _paint(colour, line):
-    """Colour a line, keeping the reset BEFORE the newline.
+def _paint(color, line):
+    """Color a line, keeping the reset BEFORE the newline.
 
     Resetting after the newline makes terminals paint the rest of the row,
     which is very visible with inverse video."""
     body = line.rstrip("\n")
-    return colour + body + _RESET + line[len(body):]
+    return color + body + _RESET + line[len(body):]
 
 
 def _mark_spans(old, new):
@@ -1307,7 +1310,7 @@ def _mark_spans(old, new):
 def _emit_change(minus, plus, write):
     if len(minus) != len(plus):
         # No 1:1 pairing exists - a @block collapsing five lines into one gets
-        # here. Nothing sensible to align, so plain line colours.
+        # here. Nothing sensible to align, so plain line colors.
         for line in minus:
             write(_paint(_RED, line))
         for line in plus:
@@ -1330,7 +1333,7 @@ def _emit_change(minus, plus, write):
         write(new)
 
 
-def emit_diff(original, out, name, write, colour):
+def emit_diff(original, out, name, write, color):
     """Unified diff, optionally with the changed span within a line inverted.
 
     Whole-line red/green is nearly useless on a log: in a 200-character line
@@ -1340,7 +1343,7 @@ def emit_diff(original, out, name, write, colour):
     diff = list(difflib.unified_diff(
         original, out, fromfile=name, tofile=name + " (redacted)"
     ))
-    if not colour:
+    if not color:
         write("".join(diff))
         return
 
@@ -1588,7 +1591,7 @@ def main(argv=None):
                 if write_back(path, original, out):
                     changed += 1
         elif args.diff:
-            colour = want_color(args.color, sys.stdout)
+            color = want_color(args.color, sys.stdout)
             for path in args.files or [None]:
                 if path is None:
                     original = sys.stdin.readlines()
@@ -1598,7 +1601,7 @@ def main(argv=None):
                 else:
                     original, out = run_buffered(path)
                     name = path
-                emit_diff(original, out, name, sys.stdout.write, colour)
+                emit_diff(original, out, name, sys.stdout.write, color)
         elif args.check or args.audit:
             # both are dry runs over the stream; --check only wants the counters,
             # --audit inspects what came out the far end
