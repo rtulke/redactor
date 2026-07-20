@@ -15,6 +15,8 @@ rule from your config files, and writes the result to stdout.
 cat /var/log/messages | redactor                       # filter a log
 redactor --diff README.md                              # preview
 redactor -i --map .redactor.map README.md src/*.py     # rewrite files in place
+redactor -r --diff .                                   # preview a whole tree
+redactor -r -i . --exclude 'tests/*'                   # scrub the tree in place
 redactor --check README.md                             # check only, for pre-commit
 redactor --audit access.log                            # what did I forget?
 redactor --unredact --map .redactor.map answer.txt     # map applied backwards
@@ -278,7 +280,7 @@ These detect a whole category and assign a **stable** pseudonym per distinct val
 | `@ip` | every IPv4/IPv6 → `10.0.0.1`, `fd00::1` |
 | `@email` | every address → `redacted1@example.com` |
 | `@mac` | every MAC → `02:00:00:00:00:01` |
-| `@hostname` | this host's names → `host1`. With arguments: `@hostname web01 /ge[0-9]{3}/` |
+| `@hostname` | this host's names → `host1`. With arguments: `@hostname web01 /srv[0-9]{3}/` |
 | `@user` | current user → `user1`. With arguments: `@user robert /svc-.*/` |
 | `@uri` | `https://git.corp/x?token=a` → `https://host1/x` |
 | `@path` | `/home/alice/...` → `/home/user1/...`. With arguments: prefix replacement |
@@ -294,7 +296,7 @@ These detect a whole category and assign a **stable** pseudonym per distinct val
 `@hostname` and `@user` take plain names, `/regex/` patterns, or a mix:
 
 ```
-@hostname web01 db01.corp.local /ge[0-9]{3}/
+@hostname web01 db01.corp.local /srv[0-9]{3}/
 @user robert /svc-.*/
 ```
 
@@ -302,21 +304,21 @@ A pattern is for a **fleet with a naming scheme**, where listing every machine
 means the next one someone racks leaks the first time it appears in a log — and
 you find out afterwards.
 
-Why not just a regex rule? Because `/ge[0-9]{3}/ HOST` would call every machine
+Why not just a regex rule? Because `/srv[0-9]{3}/ HOST` would call every machine
 `HOST`. A pattern here still goes through the mapping:
 
 ```
-Rule:   @hostname /ge[0-9]{3}/
+Rule:   @hostname /srv[0-9]{3}/
 
-  ge208.naz.ch  ->  host1.naz.ch
-  ge113.naz.ch  ->  host2.naz.ch
-  ge208.naz.ch  ->  host1.naz.ch     <- the 1 again
+  srv208.example.com  ->  host1.example.com
+  srv113.example.com  ->  host2.example.com
+  srv208.example.com  ->  host1.example.com     <- the 1 again
 ```
 
 So you keep the thing that makes redactor worth using over `sed`: you can still
 see which lines concern the same machine, without knowing which one.
 
-Names and patterns share one mapping table, so `@hostname web01 /ge[0-9]{3}/`
+Names and patterns share one mapping table, so `@hostname web01 /srv[0-9]{3}/`
 numbers them in one sequence. Internally they become two rules — a literal is
 its own cheap gate, a regex cannot be gated at all (see [Speed](#speed)) — but
 that is invisible except in `--list-rules`.
@@ -502,10 +504,14 @@ the remainder stays redacted — when in doubt, too much.
 | `-b`, `--blank` | replace every match with as many spaces as it was long |
 | `-k`, `--keep-length` | pad the replacement with spaces to the original length |
 | `-i`, `--in-place` | rewrite the files directly |
+| `-r`, `--recursive` | descend into directory arguments (skips `.git`, symlinks, binaries) |
+| `--exclude GLOB` | skip files/dirs matching GLOB while recursing (repeatable) |
+| `--include GLOB` | while recursing, take only files matching GLOB (repeatable) |
 | `-d`, `--diff` | unified diff of the changes, no output |
 | `--color WHEN` | `auto` (default) / `always` / `never` — colors the diff and marks the changed span |
 | `-c`, `--check` | check only, exit 1 on any match |
 | `-A`, `--audit` | report what looks sensitive and has no rule |
+| `-AA`, `--audit-all` | same, but list every finding in full (no cap, no clipping) |
 | `-m PATH`, `--map` | keep the mapping persistent |
 | `-u`, `--unredact` | apply the map backwards |
 | `-s`, `--stats` | match count per rule to stderr |
@@ -534,9 +540,9 @@ that actually differ are inverted:
 --- access.log
 +++ access.log (redacted)
 @@ -1,2 +1,2 @@
--Jul 16 13:56:56 ge208.naz.ch sshd[2764440]: Accepted publickey for turo from 10.0.10.113
+-Jul 16 13:56:56 srv208.example.com sshd[2764440]: Accepted publickey for robert from 10.0.10.113
 +Jul 16 13:56:56 host1.example.com sshd[2764440]: Accepted publickey for user1 from 10.0.0.1
-                 ^^^^^^^^^^^^^^^^                                          ^^^^^     ^^^^^^^^
+                 ^^^^^^^^^^^^^^^^^^                                       ^^^^^^      ^^^^^^^^^^^
                  inverted, the rest of the line is plain red / green
 ```
 
@@ -583,6 +589,16 @@ Three design decisions make it usable:
 It **redacts nothing** and writes no output; the exit code is always 0. `--audit` asks,
 it does not decide — which is why it is deliberately chatty: a missed value is a leak, a
 false positive is one line of noise.
+
+The report is a summary on purpose: each category shows its five loudest values and clips
+anything past 60 characters, so a noisy log stays skimmable. When `-A` tells you a category
+is worth reading in full, `-AA` (or `--audit-all`) lifts both caps and prints every value
+at full length:
+
+```bash
+redactor -p webserver --audit access.log      # skim: top 5 per category
+redactor -p webserver --audit-all access.log  # the whole list, untruncated
+```
 
 It looks for: internal hostnames (`.local`, `.corp`, `.lan`, …), domains, e-mail
 addresses, IPs, MACs, URL hosts, home paths, SSH keys, long digit runs (9+), hex blobs
@@ -648,6 +664,39 @@ Needs file arguments (you cannot rewrite a pipe in place). Writes via a temp fil
 preserved, and files with no matches are not touched at all (mtime stays).
 
 > `-i` overwrites your original. Run `--diff` first the first time.
+
+## `-r` / `--recursive` — a whole tree at once
+
+`-r` turns a directory argument into the list of text files under it, then hands that list
+to whatever mode you asked for. It is *pure file expansion*: `-r -i` rewrites the tree,
+`-r -d` previews it as one big diff, `-r -c` fails CI if anything in the tree still leaks,
+`-r -A` audits the lot. A directory without `-r` is an error, the same way `grep` refuses.
+
+```bash
+redactor -r -d -m .redactor.map .                 # preview the whole project
+redactor -r -i -m .redactor.map . --exclude 'tests/*'   # then rewrite it
+```
+
+The walk deliberately never touches:
+
+- **version-control metadata** (`.git`, `.hg`, `.svn`, …) — rewriting it corrupts the repo;
+- **symbolic links** — a redaction could otherwise escape the tree or hit a shared file;
+- **binary files** — anything with a NUL byte in the first 8 kB (images, objects, archives);
+- **redactor's own `.redactor` and `.redactor.map`** — the config holds your raw secrets and
+  the map is the un-redaction key; scrubbing either would be self-defeating.
+
+`--exclude GLOB` prunes more (matched against the file name *or* the path relative to the
+directory, so both `--exclude '*.min.js'` and `--exclude 'vendor/*'` work; a matching
+directory is never entered). `--include GLOB` narrows to only matching files; `--exclude`
+wins over `--include`. Both are repeatable. Anything skipped is summarised on stderr.
+
+A file you name **explicitly** is always processed — the binary/symlink guards apply only to
+files discovered by walking, never to one you asked for by name.
+
+> `-r -i` is a big hammer over a source tree: your full rule set runs on *every* file, so a
+> broad literal like `@user robert` will rewrite that word wherever it appears. Run `-r -d` or
+> `-r -c` first, and reach for `--exclude` to spare docs and fixtures. Git-tracked files only?
+> `git ls-files -z | xargs -0 redactor -i` composes with the existing in-place mode.
 
 ---
 

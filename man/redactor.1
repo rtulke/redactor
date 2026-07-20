@@ -83,6 +83,26 @@ arguments. Written via a temporary file and
 so a crash never leaves a half-redacted file; file modes are preserved and
 files with no matches are not touched at all.
 .TP
+.BR \-r ", " \-\-recursive
+Descend into any directory argument and process every text file found. A
+directory argument without \fB\-r\fR is an error. The walk skips version-control
+metadata (\fB.git\fR, \fB.hg\fR, \fB.svn\fR, \(en), symbolic links, binary files
+(anything with a NUL byte in the first 8\ kB), and redactor's own \fB.redactor\fR
+and \fB.redactor.map\fR. It is a pure file-expansion step, so it combines with
+\fB\-i\fR to rewrite a whole tree, or with \fB\-d\fR, \fB\-c\fR or \fB\-A\fR to
+preview it first. An explicitly named file is always processed; the skips apply
+only to files found by walking.
+.TP
+.BR \-\-exclude " \fIGLOB\fR"
+While recursing, skip files and directories matching \fIGLOB\fR (matched against
+the file name and against the path relative to the directory argument, so both
+\fB\-\-exclude '*.min.js'\fR and \fB\-\-exclude 'vendor/*'\fR work). A matching
+directory is pruned and never entered. Repeatable.
+.TP
+.BR \-\-include " \fIGLOB\fR"
+While recursing, process only files matching \fIGLOB\fR. Repeatable;
+\fB\-\-exclude\fR still wins over \fB\-\-include\fR.
+.TP
 .BR \-d ", " \-\-diff
 Show a unified diff of what would change. Writes no redacted output. See
 .B \-\-color
@@ -109,6 +129,13 @@ Report values that look sensitive but no rule touched. Redacts nothing, writes
 no output, always exits 0. Heuristic and deliberately chatty: it asks whether
 you meant to keep something, it does not decide. It inspects the \fIoutput\fR,
 and ignores both redactor's own placeholders and everything \fB@keep\fR spared.
+Each category is capped at its five loudest values and long values are clipped,
+so the report stays skimmable.
+.TP
+.BR \-AA ", " \-\-audit\-all
+Same audit, but without the summary: list every value in every category at full
+length, with no five-per-category cap and no clipping. Use it once \fB\-A\fR has
+told you a category is worth reading in full.
 .TP
 .BR \-s ", " \-\-stats
 After processing, print the match count per rule to standard error.
@@ -191,7 +218,7 @@ pseudonym's OUI means nothing)
 .BR @hostname " [\fINAME\fR|\fI/REGEX/\fR...]"
 Without arguments, this host's own names \(-> \fBhost1\fR. Arguments may be
 plain names, \fI/regex/\fR patterns, or both:
-\fB@hostname web01 /ge[0-9]{3}/\fR. A pattern is for a fleet with a naming
+\fB@hostname web01 /srv[0-9]{3}/\fR. A pattern is for a fleet with a naming
 scheme, where listing every machine means the next one leaks. Unlike a plain
 regex rule, matches still go through the mapping, so \fBhost1\fR and
 \fBhost2\fR stay stable and distinct.
@@ -342,6 +369,14 @@ Block a commit that still contains real data:
 .RS 4
 .EX
 redactor \-c $(git diff \-\-cached \-\-name\-only) || exit 1
+.EE
+.RE
+.PP
+Scrub a whole project tree before publishing it, previewing first:
+.RS 4
+.EX
+redactor \-r \-d \-m .redactor.map .                  # what would change?
+redactor \-r \-i \-m .redactor.map . \-\-exclude 'tests/*'
 .EE
 .RE
 .PP

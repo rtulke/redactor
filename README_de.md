@@ -15,6 +15,8 @@ Regeln aus deinen Config-Dateien an und schreibt das Ergebnis nach stdout.
 cat /var/log/messages | redactor                       # Log filtern
 redactor --diff README.md                              # Vorschau
 redactor -i --map .redactor.map README.md src/*.py     # Dateien umschreiben
+redactor -r --diff .                                   # ganzen Baum vorschauen
+redactor -r -i . --exclude 'tests/*'                   # Baum in-place schwärzen
 redactor --check README.md                             # nur prüfen, für pre-commit
 redactor --audit access.log                            # was hab ich vergessen?
 redactor --unredact --map .redactor.map antwort.txt    # Map rückwärts
@@ -278,7 +280,7 @@ Erkennen eine ganze Kategorie und vergeben pro distinktem Wert ein **stabiles** 
 | `@ip` | jede IPv4/IPv6 → `10.0.0.1`, `fd00::1` |
 | `@email` | jede Mail-Adresse → `redacted1@example.com` |
 | `@mac` | jede MAC → `02:00:00:00:00:01` |
-| `@hostname` | eigener Hostname → `host1`. Mit Argumenten: `@hostname web01 /ge[0-9]{3}/` |
+| `@hostname` | eigener Hostname → `host1`. Mit Argumenten: `@hostname web01 /srv[0-9]{3}/` |
 | `@user` | aktueller User → `user1`. Mit Argumenten: `@user robert /svc-.*/` |
 | `@uri` | `https://git.corp/x?token=a` → `https://host1/x` |
 | `@path` | `/home/alice/...` → `/home/user1/...`. Mit Argumenten: Prefix-Ersatz |
@@ -294,7 +296,7 @@ Erkennen eine ganze Kategorie und vergeben pro distinktem Wert ein **stabiles** 
 `@hostname` und `@user` nehmen Klarnamen, `/regex/`-Muster oder beides gemischt:
 
 ```
-@hostname web01 db01.corp.local /ge[0-9]{3}/
+@hostname web01 db01.corp.local /srv[0-9]{3}/
 @user robert /svc-.*/
 ```
 
@@ -302,21 +304,21 @@ Ein Muster ist für eine **Flotte mit Namensschema** gedacht — dort bedeutet
 Einzelauflistung, dass die nächste neu gerackte Maschine beim ersten Auftauchen im
 Log leakt, und du erfährst es hinterher.
 
-Warum nicht einfach eine Regex-Regel? Weil `/ge[0-9]{3}/ HOST` **jede** Maschine
+Warum nicht einfach eine Regex-Regel? Weil `/srv[0-9]{3}/ HOST` **jede** Maschine
 `HOST` nennen würde. Ein Muster hier läuft weiterhin durch das Mapping:
 
 ```
-Regel:   @hostname /ge[0-9]{3}/
+Regel:   @hostname /srv[0-9]{3}/
 
-  ge208.naz.ch  ->  host1.naz.ch
-  ge113.naz.ch  ->  host2.naz.ch
-  ge208.naz.ch  ->  host1.naz.ch     ← wieder die 1
+  srv208.example.com  ->  host1.example.com
+  srv113.example.com  ->  host2.example.com
+  srv208.example.com  ->  host1.example.com     ← wieder die 1
 ```
 
 Damit bleibt genau das erhalten, wofür man redactor statt `sed` nimmt: du siehst
 weiterhin, welche Zeilen dieselbe Maschine betreffen — ohne zu wissen, welche.
 
-Namen und Muster teilen sich **eine** Mapping-Tabelle, `@hostname web01 /ge[0-9]{3}/`
+Namen und Muster teilen sich **eine** Mapping-Tabelle, `@hostname web01 /srv[0-9]{3}/`
 nummeriert also in einer Folge durch. Intern werden zwei Regeln daraus — ein Literal
 ist sein eigenes billiges Gate, ein Regex lässt sich gar nicht gaten (siehe
 [Geschwindigkeit](#geschwindigkeit)) — sichtbar ist das nur in `--list-rules`.
@@ -502,10 +504,14 @@ bleibt der Rest redigiert — im Zweifel zu viel.
 | `-b`, `--blank` | jeden Treffer durch gleich viele Leerzeichen ersetzen |
 | `-k`, `--keep-length` | Ersatz mit Leerzeichen auf Originallänge auffüllen |
 | `-i`, `--in-place` | Dateien direkt umschreiben |
+| `-r`, `--recursive` | in Verzeichnis-Argumente absteigen (überspringt `.git`, Symlinks, Binärdateien) |
+| `--exclude GLOB` | beim Rekursieren Dateien/Verzeichnisse mit GLOB überspringen (wiederholbar) |
+| `--include GLOB` | beim Rekursieren nur Dateien mit GLOB nehmen (wiederholbar) |
 | `-d`, `--diff` | Unified Diff der Änderungen, keine Ausgabe |
 | `--color WHEN` | `auto` (Default) / `always` / `never` — färbt den Diff und markiert die geänderte Stelle |
 | `-c`, `--check` | nur prüfen, Exit 1 bei Treffern |
 | `-A`, `--audit` | melden, was verdächtig aussieht und keine Regel hat |
+| `-AA`, `--audit-all` | dasselbe, aber jeden Fund vollständig auflisten (keine Kappung) |
 | `-m PATH`, `--map` | Mapping persistent halten |
 | `-u`, `--unredact` | Map rückwärts anwenden |
 | `-s`, `--stats` | Trefferzahl pro Regel nach stderr |
@@ -534,9 +540,9 @@ Zeichen, die sich wirklich unterscheiden, werden invertiert:
 --- access.log
 +++ access.log (redacted)
 @@ -1,2 +1,2 @@
--Jul 16 13:56:56 ge208.naz.ch sshd[2764440]: Accepted publickey for turo from 10.0.10.113
+-Jul 16 13:56:56 srv208.example.com sshd[2764440]: Accepted publickey for robert from 10.0.10.113
 +Jul 16 13:56:56 host1.example.com sshd[2764440]: Accepted publickey for user1 from 10.0.0.1
-                 ^^^^^^^^^^^^^^^^                                          ^^^^^     ^^^^^^^^
+                 ^^^^^^^^^^^^^^^^^^                                       ^^^^^^      ^^^^^^^^^^^
                  invertiert, der Rest der Zeile ist schlicht rot / grün
 ```
 
@@ -583,6 +589,16 @@ Drei Design-Entscheide, die es brauchbar machen:
 Es **redigiert nichts** und schreibt keine Ausgabe, Exit-Code ist immer 0. `--audit` fragt,
 es entscheidet nicht — deshalb ist es bewusst geschwätzig: ein übersehener Wert ist ein
 Leak, ein Fehltreffer ist eine Zeile Rauschen.
+
+Der Report ist bewusst eine Zusammenfassung: jede Kategorie zeigt ihre fünf lautesten Werte
+und kappt alles über 60 Zeichen, damit ein lautes Log überschaubar bleibt. Wenn `-A` dir
+sagt, dass eine Kategorie den vollen Blick wert ist, hebt `-AA` (oder `--audit-all`) beide
+Grenzen auf und druckt jeden Wert in voller Länge:
+
+```bash
+redactor -p webserver --audit access.log      # überfliegen: Top 5 pro Kategorie
+redactor -p webserver --audit-all access.log  # die ganze Liste, ungekürzt
+```
 
 Gesucht wird nach: internen Hostnamen (`.local`, `.corp`, `.lan`, …), Domains, E-Mails,
 IPs, MACs, URL-Hosts, Home-Pfaden, SSH-Keys, langen Ziffernfolgen (9+), Hex-Blobs (32+),
@@ -648,6 +664,41 @@ Temp-Datei + `os.replace`, also atomar — bei einem Absturz gibt es keine halb-
 Datei. Dateirechte bleiben, Dateien ohne Treffer werden nicht angefasst (mtime bleibt).
 
 > `-i` überschreibt dein Original. Beim ersten Mal `--diff` davor.
+
+## `-r` / `--recursive` — ein ganzer Baum auf einmal
+
+`-r` macht aus einem Verzeichnis-Argument die Liste der Textdateien darunter und übergibt
+sie dann an den Modus, den du gewählt hast. Es ist *reine Datei-Expansion*: `-r -i`
+schreibt den Baum um, `-r -d` zeigt ihn als einen grossen Diff, `-r -c` lässt die CI
+scheitern, wenn irgendwo im Baum noch etwas leakt, `-r -A` auditiert das Ganze. Ein
+Verzeichnis ohne `-r` ist ein Fehler — genauso wie `grep` sich weigert.
+
+```bash
+redactor -r -d -m .redactor.map .                 # das ganze Projekt vorschauen
+redactor -r -i -m .redactor.map . --exclude 'tests/*'   # dann umschreiben
+```
+
+Der Lauf fasst bewusst nie an:
+
+- **Versionsverwaltungs-Metadaten** (`.git`, `.hg`, `.svn`, …) — sie umzuschreiben zerstört das Repo;
+- **Symlinks** — eine Redaktion könnte sonst aus dem Baum ausbrechen oder eine geteilte Datei treffen;
+- **Binärdateien** — alles mit einem NUL-Byte in den ersten 8 kB (Bilder, Objekte, Archive);
+- **redactors eigene `.redactor` und `.redactor.map`** — die Config enthält deine Rohgeheimnisse
+  und die Map ist der Schlüssel zum Zurückdrehen; beides zu schwärzen wäre selbstzerstörerisch.
+
+`--exclude GLOB` schliesst mehr aus (gematcht gegen den Dateinamen *oder* den Pfad relativ zum
+Verzeichnis, also funktionieren sowohl `--exclude '*.min.js'` als auch `--exclude 'vendor/*'`;
+ein passendes Verzeichnis wird gar nicht erst betreten). `--include GLOB` engt auf nur passende
+Dateien ein; `--exclude` schlägt `--include`. Beide wiederholbar. Übersprungenes wird auf
+stderr zusammengefasst.
+
+Eine **explizit genannte** Datei wird immer verarbeitet — die Binär-/Symlink-Wächter gelten nur
+für Dateien, die beim Absteigen gefunden werden, nie für eine, die du namentlich angibst.
+
+> `-r -i` ist ein grosser Hammer über einem Quellbaum: dein komplettes Regelwerk läuft auf
+> *jeder* Datei, ein breites Literal wie `@user robert` schreibt das Wort also überall um. Erst
+> `-r -d` oder `-r -c`, und `--exclude` für Doku und Fixtures. Nur versionierte Dateien?
+> `git ls-files -z | xargs -0 redactor -i` komponiert mit dem bestehenden In-place-Modus.
 
 ---
 

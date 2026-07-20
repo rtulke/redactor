@@ -31,7 +31,7 @@ Rule syntax (one rule per line; also used as the value for -e):
     @mac                                 # every MAC addr -> 02:00:00:xx:xx:xx
     @hostname                            # this host's names -> hostN
     @hostname web01 db01.corp.local      # only these hostnames -> hostN
-    @hostname /ge[0-9]{3}/               # a whole fleet by pattern -> hostN
+    @hostname /srv[0-9]{3}/               # a whole fleet by pattern -> hostN
     @user                                # current username -> userN
     @user robert alice                   # only these usernames -> userN
     @user /svc-.*/                       # ...or by pattern -> userN
@@ -62,6 +62,8 @@ Usage:
     cat /var/log/messages | redactor -a > clean.log      # confirm each change
     redactor -d README.md                                # preview as a diff
     redactor -i -m .redactor.map README.md src/*.py      # rewrite files in place
+    redactor -r -d .                                     # preview a whole tree
+    redactor -r -i . --exclude 'tests/*'                 # then scrub it
     redactor -c README.md || echo "still contains secrets"
     redactor -A access.log                               # what did I forget?
     redactor -u -m .redactor.map answer.txt              # map applied backwards
@@ -70,6 +72,7 @@ Usage:
 
 import argparse
 import difflib
+import fnmatch
 import getpass
 import json
 import os
@@ -454,7 +457,7 @@ class Auditor:
                 else:
                     seen[value] = [1, str(self.position)]
 
-    def report(self, store, out):
+    def report(self, store, out, full=False):
         # Anything we produced ourselves is not a finding: our own placeholders
         # (10.0.0.1 looks exactly like an IP) and everything @keep spared.
         ignore = set(KEEP)
@@ -470,6 +473,11 @@ class Auditor:
             out.write("redactor: audit found nothing unusual\n")
             return 0
 
+        # -A caps each category at its five loudest values and clips anything
+        # over 60 chars: enough to notice a leak, short enough to skim.  -AA
+        # (full) lifts both caps and prints every finding at full length - the
+        # mode you switch to once -A has told you there is something worth the
+        # whole list.
         total = sum(len(v) for _, v in kinds)
         out.write(
             "redactor: audit - %d value(s) no rule touched, in %d categor(ies)\n"
@@ -479,10 +487,10 @@ class Auditor:
             hits = sum(c for c, _ in values.values())
             out.write("\n  %s  (%d distinct, %d hit(s))\n" % (kind, len(values), hits))
             ranked = sorted(values.items(), key=lambda kv: -kv[1][0])
-            for value, (count, where) in ranked[:5]:
-                shown = value if len(value) <= 60 else value[:57] + "..."
+            for value, (count, where) in (ranked if full else ranked[:5]):
+                shown = value if (full or len(value) <= 60) else value[:57] + "..."
                 out.write("    %-62s %dx  first at %s\n" % (shown, count, where))
-            if len(ranked) > 5:
+            if not full and len(ranked) > 5:
                 out.write("    ... and %d more\n" % (len(ranked) - 5))
         out.write(
             "\n  Not necessarily leaks - audit only asks whether you meant to keep\n"
@@ -726,7 +734,7 @@ def _ident_rule(label, category, values, fmt, source):
 
     `values` may mix plain names with /regex/ patterns:
 
-        @hostname web01 db01 /ge[0-9]{3}/
+        @hostname web01 db01 /srv[0-9]{3}/
 
     Patterns exist for fleets with a naming scheme, where listing every machine
     means the next new one leaks.  A plain regex rule could match them too, but
@@ -1064,6 +1072,105 @@ def find_map_file():
     Creating one is left to an explicit --map, so a stray run never starts
     silently persisting a mapping you did not ask for."""
     return _walk_up(MAP_BASENAME)
+
+
+# --------------------------------------------------------------------------
+# -r/--recursive: expand directory arguments into their files
+# --------------------------------------------------------------------------
+#
+# -r is a pure file-expansion step: it turns a directory into the list of text
+# files under it and then hands off to the exact same -i/-d/-c/-A code paths a
+# list of files would take.  Everything here is about NOT touching the wrong
+# file - a redaction sweep that rewrites .git internals or your .redactor.map
+# is worse than one that skips a file it should have caught.
+
+# Version-control metadata is never redactable text; rewriting it corrupts the
+# repository.  Pruned from the walk, always.
+_SKIP_DIRS = frozenset((".git", ".hg", ".svn", ".bzr", "CVS", "_darcs"))
+
+
+def _is_redactor_file(name):
+    """redactor's own files, which a tree sweep must never rewrite: the config
+    holds your raw secrets by design, the .map is the un-redaction key, and a
+    *.redactor.tmp is a half-written output from an interrupted run."""
+    return (
+        name == CONFIG_BASENAME
+        or name.endswith(MAP_BASENAME)
+        or name.endswith(".redactor.tmp")
+    )
+
+
+def _looks_binary(path):
+    """A NUL byte in the first 8 kB means "not text".  Real UTF-8 / Latin-1
+    text never contains NUL, so this never skips a file it should redact; it
+    only spares images, binaries and the like from being mangled."""
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(8192)
+    except OSError:
+        return True  # unreadable: skip it, same as binary
+
+
+def _matches_glob(relpath, name, globs):
+    # Match against the path-relative form (tests/x.py) OR the bare name (x.py),
+    # so both --exclude 'tests/*' and --exclude '*.py' do what you expect.
+    for pat in globs:
+        if fnmatch.fnmatch(relpath, pat) or fnmatch.fnmatch(name, pat):
+            return True
+    return False
+
+
+def walk_files(paths, recursive, exclude, include, skipped):
+    """Expand command-line paths into the list of files to process.
+
+    A named file is passed through untouched (only --exclude/--include filter
+    it - an explicitly named file is the user's choice, so it is never dropped
+    for being binary or a symlink).  A directory is walked only with -r; without
+    it a directory is an error, like grep.  The walk skips VCS metadata,
+    symlinks, binary files and redactor's own .redactor/.redactor.map, and
+    honours --exclude/--include.  `skipped` is a counter dict the caller reads
+    for its summary."""
+    exclude = exclude or []
+    include = include or []
+    result = []
+    for path in paths:
+        if os.path.isdir(path):
+            if not recursive:
+                raise IsADirectoryError(
+                    "%s is a directory (use -r to recurse into it)" % path
+                )
+            for root, dirs, files in os.walk(path):
+                # prune in place so os.walk does not descend into them
+                dirs[:] = sorted(
+                    d for d in dirs
+                    if d not in _SKIP_DIRS
+                    and not _matches_glob(
+                        os.path.relpath(os.path.join(root, d), path), d, exclude)
+                )
+                for name in sorted(files):
+                    full = os.path.join(root, name)
+                    rel = os.path.relpath(full, path)
+                    if _is_redactor_file(name):
+                        skipped["redactor"] += 1
+                    elif _matches_glob(rel, name, exclude):
+                        skipped["excluded"] += 1
+                    elif include and not _matches_glob(rel, name, include):
+                        pass  # not matched by --include: simply not ours
+                    elif os.path.islink(full):
+                        skipped["symlink"] += 1
+                    elif _looks_binary(full):
+                        skipped["binary"] += 1
+                    else:
+                        result.append(full)
+        else:
+            name = os.path.basename(path)
+            if _matches_glob(path, name, exclude):
+                skipped["excluded"] += 1
+            elif include and not _matches_glob(path, name, include):
+                pass
+            else:
+                result.append(path)
+    return result
 
 
 def profile_dirs():
@@ -1436,6 +1543,22 @@ def main(argv=None):
         help="rewrite the given files instead of writing to stdout",
     )
     parser.add_argument(
+        "-r", "--recursive", action="store_true",
+        help="descend into directory arguments and process every text file "
+             "found (skips .git, symlinks and binary files). Combine with -i to "
+             "rewrite a whole tree, or -d/-c/-A to preview it first",
+    )
+    parser.add_argument(
+        "--exclude", metavar="GLOB", action="append",
+        help="skip files or directories matching GLOB while recursing "
+             "(matched against the name or the relative path; repeatable)",
+    )
+    parser.add_argument(
+        "--include", metavar="GLOB", action="append",
+        help="while recursing, process only files matching GLOB "
+             "(repeatable; --exclude still wins over --include)",
+    )
+    parser.add_argument(
         "-m", "--map", metavar="PATH",
         help="keep the value->placeholder mapping in PATH, so the same host/ip/user "
              "gets the same placeholder across runs and files (created if missing; "
@@ -1463,9 +1586,15 @@ def main(argv=None):
              "(for pre-commit hooks and CI)",
     )
     parser.add_argument(
-        "-A", "--audit", action="store_true",
+        "-A", "--audit", action="count", default=0,
         help="do not redact: report values that look sensitive but no rule "
-             "touched. Heuristic - it asks, it does not decide",
+             "touched. Heuristic - it asks, it does not decide. Repeat as -AA "
+             "(or use --audit-all) to list every finding in full",
+    )
+    parser.add_argument(
+        "--audit-all", action="store_true",
+        help="like -A but without the summary: list every value in every "
+             "category at full length (no top-5 cap, no clipping). Same as -AA",
     )
     parser.add_argument(
         "-l", "--list-rules", action="store_true",
@@ -1480,6 +1609,12 @@ def main(argv=None):
         version="redactor %s\n%s <%s>\n%s" % (__version__, __author__, __email__, __url__),
     )
     args = parser.parse_args(argv)
+
+    # -A counts (so -AA -> 2); --audit-all is the long form of level 2.  Collapse
+    # both into one bool the rest of main() can test, plus audit_full for report().
+    audit_level = max(args.audit, 2 if args.audit_all else 0)
+    args.audit = audit_level >= 1
+    audit_full = audit_level >= 2
 
     if args.list_profiles:
         found = list_profiles()
@@ -1498,6 +1633,42 @@ def main(argv=None):
         parser.error("-i/--in-place needs file arguments, it cannot rewrite a pipe")
     if args.unredact and (args.blank or args.check or args.audit):
         parser.error("--unredact cannot be combined with -b/--blank, --check or --audit")
+
+    # -r expands directory arguments into their files, so everything downstream
+    # (-i/-d/-c/-A and plain stdout alike) just sees a flat list of files.  A
+    # directory without -r is an error, like grep.
+    if args.recursive and not args.files:
+        parser.error("-r/--recursive needs at least one directory or file")
+    if (args.exclude or args.include) and not args.files:
+        parser.error("--exclude/--include only apply to file arguments")
+    had_paths = bool(args.files)
+    skipped = {"binary": 0, "symlink": 0, "excluded": 0, "redactor": 0}
+    if args.files:
+        try:
+            args.files = walk_files(
+                args.files, args.recursive, args.exclude, args.include, skipped
+            )
+        except IsADirectoryError as exc:
+            parser.error(str(exc))
+
+    def skipped_note():
+        parts = [
+            "%d %s" % (n, kind) for kind, n in (
+                ("binary", skipped["binary"]),
+                ("symlink", skipped["symlink"]),
+                ("excluded", skipped["excluded"]),
+                ("redactor-owned", skipped["redactor"]),
+            ) if n
+        ]
+        if parts:
+            sys.stderr.write("redactor: skipped %s\n" % ", ".join(parts))
+
+    # paths were given but every one was filtered/skipped: do nothing rather than
+    # fall through to reading stdin (which -d/-c/-A would otherwise do on []).
+    if had_paths and not args.files:
+        skipped_note()
+        sys.stderr.write("redactor: no files to process\n")
+        return 0
 
     # -n means "only what I passed on the command line", so it has to switch off
     # the .redactor.map auto-discovery too - otherwise a map file somewhere up
@@ -1633,13 +1804,15 @@ def main(argv=None):
         sys.stderr.write("redactor: %s\n" % exc)
         return 2
 
+    skipped_note()
+
     # --check/--diff/--audit are dry runs: don't let them burn placeholder
     # numbers. --unredact only reads the map.
     if not (args.check or args.diff or args.audit or args.unredact):
         STORE.save()
 
     if args.audit:
-        auditor.report(STORE, sys.stderr)
+        auditor.report(STORE, sys.stderr, full=audit_full)
         return 0
 
     if args.in_place:

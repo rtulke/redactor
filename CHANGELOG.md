@@ -18,7 +18,7 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Classes**: `@ip`, `@ipv6`, `@email`, `@mac`, `@hostname`, `@user`, `@uri`,
   `@path`, `@sshkey`, `@phone`, `@secret`, `@keep`.
 - **`@hostname` / `@user` take `/regex/` patterns**, mixed with plain names:
-  `@hostname web01 /ge[0-9]{3}/`. For a fleet with a naming scheme, where
+  `@hostname web01 /srv[0-9]{3}/`. For a fleet with a naming scheme, where
   listing every machine means the next one leaks. Unlike a plain regex rule,
   matches still go through the mapping, so the pseudonyms stay stable and
   distinct instead of collapsing to one fixed replacement.

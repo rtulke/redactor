@@ -9,7 +9,8 @@ _redactor() {
 
     opts="-e --expr -f --file -p --profile --list-profiles
           -a --ask -b --blank -k --keep-length
-          -i --in-place -d --diff -c --check -A --audit
+          -i --in-place -r --recursive --exclude --include
+          -d --diff -c --check -A --audit --audit-all
           -m --map -u --unredact
           -s --stats -l --list-rules -n --no-config
           -V --version -h --help"

@@ -147,28 +147,28 @@ class IdentPatterns(unittest.TestCase):
     """@hostname / @user given a /regex/ instead of a list of names."""
 
     def test_hostname_by_pattern(self):
-        self.assertEqual(redact(["@hostname /ge[0-9]{3}/"], "ge208"), "host1")
+        self.assertEqual(redact(["@hostname /srv[0-9]{3}/"], "srv208"), "host1")
 
     def test_pattern_is_word_bounded(self):
-        for text in ("xge208", "ge2085", "ge208x"):
-            self.assertEqual(redact(["@hostname /ge[0-9]{3}/"], text), text, text)
+        for text in ("xsrv208", "srv2085", "srv208x"):
+            self.assertEqual(redact(["@hostname /srv[0-9]{3}/"], text), text, text)
 
     def test_pattern_stops_at_the_domain(self):
         # the real case this was built for: sshd logs the fqdn
         self.assertEqual(
-            redact(["@hostname /ge[0-9]{3}/"], "ge208.naz.ch"), "host1.naz.ch"
+            redact(["@hostname /srv[0-9]{3}/"], "srv208.example.com"), "host1.example.com"
         )
 
     def test_pattern_pseudonyms_are_stable(self):
         _, out, _ = run(
-            ["-n", "-e", "@hostname /ge[0-9]{3}/"], "ge208\nge113\nge208\n"
+            ["-n", "-e", "@hostname /srv[0-9]{3}/"], "srv208\nsrv113\nsrv208\n"
         )
         # the whole point over a plain /regex/ rule: same host, same placeholder,
         # different hosts stay distinguishable
         self.assertEqual(out, "host1\nhost2\nhost1\n")
 
     def test_literals_and_patterns_share_one_mapping(self):
-        out = redact(["@hostname web01 /ge[0-9]{3}/"], "web01 and ge208")
+        out = redact(["@hostname web01 /srv[0-9]{3}/"], "web01 and srv208")
         self.assertEqual(out, "host1 and host2")
 
     def test_user_by_pattern(self):
@@ -183,9 +183,9 @@ class IdentPatterns(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         mapfile = os.path.join(tmp.name, "m.json")
-        rule = "@hostname /host[0-9]+|ge[0-9]{3}/"
+        rule = "@hostname /host[0-9]+|srv[0-9]{3}/"
 
-        _, first, _ = run(["-n", "-m", mapfile, "-e", rule], "ge208\n")
+        _, first, _ = run(["-n", "-m", mapfile, "-e", rule], "srv208\n")
         self.assertEqual(first, "host1\n")
 
         _, second, _ = run(["-n", "-m", mapfile, "-e", rule], first)
@@ -196,8 +196,8 @@ class IdentPatterns(unittest.TestCase):
         self.assertIn("bad regex", err)
 
     def test_pattern_survives_a_second_run(self):
-        once = redact(["@hostname /ge[0-9]{3}/"], "ge208")
-        self.assertEqual(redact(["@hostname /ge[0-9]{3}/"], once), once)
+        once = redact(["@hostname /srv[0-9]{3}/"], "srv208")
+        self.assertEqual(redact(["@hostname /srv[0-9]{3}/"], once), once)
 
 
 class Secrets(unittest.TestCase):
@@ -369,6 +369,31 @@ class Modes(unittest.TestCase):
     def test_audit_writes_no_output(self):
         _, out, _ = run(["-n", "-e", "@ip", "-A"], "from 192.168.1.50\n")
         self.assertEqual(out, "")
+
+    def test_audit_caps_a_category_at_five(self):
+        text = " ".join("h%d.corp.local" % i for i in range(7)) + "\n"
+        _, _, err = run(["-n", "-e", "@ip", "-A"], text)
+        self.assertIn("... and 2 more", err)
+
+    def test_audit_all_lists_everything(self):
+        # -AA (== --audit-all) lifts the top-5 cap: all seven show, no "more"
+        text = " ".join("h%d.corp.local" % i for i in range(7)) + "\n"
+        _, _, err = run(["-n", "-e", "@ip", "-AA"], text)
+        self.assertNotIn("more", err)
+        for i in range(7):
+            self.assertIn("h%d.corp.local" % i, err)
+
+    def test_audit_all_long_form_equals_double(self):
+        text = " ".join("h%d.corp.local" % i for i in range(7)) + "\n"
+        _, _, err = run(["-n", "-e", "@ip", "--audit-all"], text)
+        self.assertNotIn("more", err)
+        self.assertIn("h6.corp.local", err)
+
+    def test_audit_all_shows_full_length_values(self):
+        blob = "ab01" * 16  # 64 hex chars, past the 60-char clip
+        _, _, err = run(["-n", "-e", "@ip", "-AA"], "tok %s end\n" % blob)
+        self.assertIn(blob, err)
+        self.assertNotIn("...", err)
 
     def test_exclusive_modes(self):
         code, _, err = run(["-n", "-c", "-d"], "x\n")
@@ -549,6 +574,108 @@ class InPlace(unittest.TestCase):
         self.assertEqual(os.stat(self.path).st_mtime_ns, before)
 
 
+class Recursive(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def mk(self, rel, content="ip 192.168.1.50\n", binary=False):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        mode, data = ("wb", content) if binary else ("w", content)
+        with open(path, mode) as fh:
+            fh.write(data)
+        return path
+
+    def read(self, rel):
+        with open(os.path.join(self.root, rel)) as fh:
+            return fh.read()
+
+    def test_recursive_redacts_nested_files(self):
+        self.mk("a.log")
+        self.mk("sub/b.txt")
+        run(["-n", "-e", "@ip", "-r", "-i", self.root])
+        self.assertEqual(self.read("a.log"), "ip 10.0.0.1\n")
+        self.assertIn("10.0.0", self.read("sub/b.txt"))
+
+    def test_directory_without_r_is_an_error(self):
+        self.mk("a.log")
+        code, _, err = run(["-n", "-e", "@ip", "-i", self.root])
+        self.assertEqual(code, 2)
+        self.assertIn("is a directory", err)
+
+    def test_recursive_skips_vcs_metadata(self):
+        self.mk("a.log")
+        self.mk(".git/config", "ip 192.168.1.50\n")
+        run(["-n", "-e", "@ip", "-r", "-i", self.root])
+        self.assertEqual(self.read(".git/config"), "ip 192.168.1.50\n")
+
+    def test_recursive_skips_binary(self):
+        self.mk("logo.png", b"ip \x00\x00 192.168.1.50\n", binary=True)
+        _, _, err = run(["-n", "-e", "@ip", "-r", "-i", self.root])
+        self.assertIn("1 binary", err)
+        self.assertEqual(self.read("logo.png"), "ip \x00\x00 192.168.1.50\n")
+
+    def test_recursive_skips_symlink(self):
+        self.mk("a.log")
+        os.symlink("a.log", os.path.join(self.root, "link.log"))
+        _, _, err = run(["-n", "-e", "@ip", "-r", "-i", self.root])
+        self.assertIn("1 symlink", err)
+
+    def test_recursive_skips_redactor_own_files(self):
+        self.mk("a.log")
+        self.mk(".redactor", "192.168.1.50 x\n")
+        self.mk(".redactor.map", '{"ip": {"192.168.1.50": "10.0.0.1"}}\n')
+        _, _, err = run(["-n", "-e", "@ip", "-r", "-i", self.root])
+        self.assertIn("2 redactor-owned", err)
+        self.assertIn("192.168.1.50", self.read(".redactor"))
+        self.assertIn("192.168.1.50", self.read(".redactor.map"))
+
+    def test_exclude_prunes_directory(self):
+        self.mk("a.log")
+        self.mk("tests/fixture.txt")
+        run(["-n", "-e", "@ip", "-r", "-i", "--exclude", "tests", self.root])
+        self.assertEqual(self.read("tests/fixture.txt"), "ip 192.168.1.50\n")
+        self.assertEqual(self.read("a.log"), "ip 10.0.0.1\n")
+
+    def test_exclude_glob_skips_files(self):
+        self.mk("a.log")
+        self.mk("b.txt")
+        run(["-n", "-e", "@ip", "-r", "-i", "--exclude", "*.log", self.root])
+        self.assertEqual(self.read("a.log"), "ip 192.168.1.50\n")
+        self.assertEqual(self.read("b.txt"), "ip 10.0.0.1\n")
+
+    def test_include_limits_to_matching(self):
+        self.mk("keep.md")
+        self.mk("take.txt")
+        run(["-n", "-e", "@ip", "-r", "-i", "--include", "*.txt", self.root])
+        self.assertEqual(self.read("keep.md"), "ip 192.168.1.50\n")
+        self.assertEqual(self.read("take.txt"), "ip 10.0.0.1\n")
+
+    def test_recursive_check_reports_across_tree(self):
+        self.mk("a.log")
+        self.mk("sub/b.txt")
+        code, _, err = run(["-n", "-e", "@ip", "-r", "-c", self.root])
+        self.assertEqual(code, 1)
+        self.assertIn("2 match(es)", err)
+
+    def test_empty_expansion_does_not_read_stdin(self):
+        # a tree with only skippable files must NOT fall through to stdin -
+        # otherwise -d/-c would silently redact the pipe instead of the tree
+        self.mk("logo.png", b"\x00\x00\n", binary=True)
+        _, out, err = run(["-n", "-e", "@ip", "-r", "-d", self.root], "ip 1.1.1.1\n")
+        self.assertEqual(out, "")
+        self.assertIn("no files to process", err)
+
+    def test_recursive_needs_paths(self):
+        code, _, err = run(["-n", "-e", "@ip", "-r"], "x\n")
+        self.assertEqual(code, 2)
+        self.assertIn("needs at least one", err)
+
+
 class Profiles(unittest.TestCase):
     def test_list_profiles_finds_the_shipped_ones(self):
         _, out, _ = run(["--list-profiles"])
@@ -596,9 +723,10 @@ class Meta(unittest.TestCase):
         with open(os.path.join(ROOT, "man", "redactor.1")) as fh:
             page = fh.read()
         for flag in ("--expr", "--file", "--profile", "--list-profiles", "--ask",
-                     "--blank", "--keep-length", "--in-place", "--diff", "--check",
-                     "--audit", "--map", "--unredact", "--stats", "--list-rules",
-                     "--no-config", "--version"):
+                     "--blank", "--keep-length", "--in-place", "--recursive",
+                     "--exclude", "--include", "--diff", "--check",
+                     "--audit", "--audit-all", "--map", "--unredact", "--stats",
+                     "--list-rules", "--no-config", "--version"):
             self.assertIn(flag.replace("-", "\\-"), page, flag)
 
     def test_completion_offers_every_builtin(self):
