@@ -287,6 +287,10 @@ Erkennen eine ganze Kategorie und vergeben pro distinktem Wert ein **stabiles** 
 | `@sshkey` | `SHA256:47DEQ...`, `ssh-rsa AAAA...` → `sshkey1` |
 | `@phone` | `+41 79 123 45 67` → `phone1` (nur international; national per Land) |
 | `@secret` | API-Keys, Tokens, Hashes, `password=…` → `[SECRET]` |
+| `@jwt` | JSON Web Tokens `eyJ….eyJ….sig` → `[SECRET]` |
+| `@field KEY…` | Wert eines benannten Felds (JSON / `key=` / Header) → `[REDACTED]` |
+| `@creditcard` | 13–19 Ziffern mit gültiger Luhn-Prüfsumme → `[CARD]` |
+| `@iban` | IBANs mit gültiger mod-97-Prüfsumme → `[IBAN]` |
 | `@keep` | Gegenteil: diese Werte **nie** ersetzen |
 
 `@hostname`, `@user` und `@sshkey` sind **automatisch wortgebunden**.
@@ -448,7 +452,7 @@ Deshalb ist `@secret` auch **nicht** mit `--unredact` umkehrbar.
 
 | erkannt | Beispiel |
 |---|---|
-| Vendor-Tokens | `AKIA…`, `ghp_…`, `glpat-…`, `xoxb-…`, `AIza…`, `sk_live_…`, `sk-…`, `npm_…` |
+| Vendor-Tokens | `AKIA…`, `ghp_…`, `github_pat_…`, `glpat-…`, `xoxb-…`, `AIza…`, `ya29.…`, `sk_live_…`, `sk-…`, `npm_…`, `SG.…`, `key-…` (Mailgun), `dop_v1_…`, `hvs.…` (Vault), `shpat_…`, `sq0…` |
 | JWTs | `eyJhbGci….eyJzdWI….xxx` |
 | **Query-Parameter** | `?token=abc`, `&api_key=xyz`, `&session=…` |
 | Bearer / Basic | `Authorization: Bearer …`, `Basic dXNlcjpwdw==` |
@@ -467,6 +471,37 @@ Passwort-Hashes zählen als Secret: ein `$6$`-Hash aus `/etc/shadow` ist offline
 > **`@secret` ist bewusst übereifrig.** In Code trifft die Zuweisungs-Regel auch
 > `token = get_token()` → `token = [SECRET]`. Über-redigieren ist kosmetisch, ein
 > durchgerutschter Live-Key nicht. Prüf mit `--diff` oder `--stats`.
+
+`@jwt` ist der JWT-Teil von `@secret` allein — wenn du nur Tokens strippen willst, sonst
+nichts. Das fertige **`secrets`-Profil** bündelt `@secret` mit `@field` für die üblichen
+Auth-Keys: `redactor -p secrets` ist der „Credentials raus, bevor ich das reinpaste"-Knopf.
+
+### `@field KEY…` — einen Wert über seinen Key schwärzen
+
+`@secret` matcht über die **Form** des Werts (`AKIA…`, `eyJ…`). Die heikelsten Werte haben
+aber keine Form — ein Passwort, ein Session-Token, ein `X-Api-Key`. `@field` matcht
+stattdessen über den **Key** und kennt die drei Schreibweisen eines Key-Value-Paars:
+
+```bash
+redactor -e '@field password authorization api_key' app.log
+```
+
+| Eingabe | Ausgabe |
+|---|---|
+| `{"password": "hunter2"}` | `{"password": "[REDACTED]"}` |
+| `password=hunter2` / `?api_key=abc&x=1` | `password=[REDACTED]` / `?api_key=[REDACTED]&x=1` |
+| `Authorization: Bearer eyJ… x` | `Authorization: [REDACTED]` |
+
+Die Header-Form läuft bis zum Zeilenende, ein Wert mit Leerzeichen (`Bearer x`) wird also
+ganz erwischt — genau das, was `@secret`s feste `assignment`-Regel nicht kann.
+Case-insensitiv auf dem Key, einweg (nicht per `--unredact` zurückholbar).
+
+### `@creditcard` / `@iban` — prüfsummen-gated PII
+
+Beide sind reine Ziffern, das Fehltreffer-Minenfeld von `@phone` — deshalb ist jede über
+eine **Prüfsumme** gated. `@creditcard` (13–19 Ziffern, mit Leerzeichen oder Bindestrich)
+feuert nur bei gültiger **Luhn**-Summe; eine 16-stellige ID, die keine Karte ist, bleibt
+unangetastet. `@iban` prüft **mod-97**. Feste Marker `[CARD]` / `[IBAN]`, einweg.
 
 ## 4. Regex
 
@@ -512,6 +547,8 @@ bleibt der Rest redigiert — im Zweifel zu viel.
 | `-c`, `--check` | nur prüfen, Exit 1 bei Treffern |
 | `-A`, `--audit` | melden, was verdächtig aussieht und keine Regel hat |
 | `-AA`, `--audit-all` | dasselbe, aber jeden Fund vollständig auflisten (keine Kappung) |
+| `--strict` | mit `--audit`: Exit 1 bei jedem Fund (Commit / CI abriegeln) |
+| `--entropy` | mit `--audit`: zusätzlich hoch-entropische Token-Strings melden |
 | `-m PATH`, `--map` | Mapping persistent halten |
 | `-u`, `--unredact` | Map rückwärts anwenden |
 | `-s`, `--stats` | Trefferzahl pro Regel nach stderr |
@@ -603,6 +640,18 @@ redactor -p webserver --audit-all access.log  # die ganze Liste, ungekürzt
 Gesucht wird nach: internen Hostnamen (`.local`, `.corp`, `.lan`, …), Domains, E-Mails,
 IPs, MACs, URL-Hosts, Home-Pfaden, SSH-Keys, langen Ziffernfolgen (9+), Hex-Blobs (32+),
 Base64-Blobs (24+) und `-----BEGIN`-Markern.
+
+Zwei Modifier machen aus dem Reden mehr:
+
+```bash
+redactor -A --strict  file    # Exit 1 bei jedem Fund — Commit / CI abriegeln
+redactor -A --entropy file    # zusätzlich hoch-entropische Token-Strings melden
+```
+
+`--strict` macht Audit zum Tor für die **unbekannten** Formen, wie `--check` es für die
+bekannten ist. `--entropy` ergänzt das Netz für Credentials, deren Form kein Muster kennt —
+ein zufälliger API-Key wird allein wegen seiner Zufälligkeit gemeldet. Konservativ (ein
+camelCase-Bezeichner bleibt still) und per Default aus, weil es die lauteste Prüfung ist.
 
 ## `-p` / `--profile`
 

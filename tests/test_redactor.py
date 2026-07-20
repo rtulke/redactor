@@ -214,8 +214,18 @@ class Secrets(unittest.TestCase):
     def test_vendor_tokens(self):
         # AKIAIOSFODNN7EXAMPLE is AWS's own documentation key: AKIA + exactly 16.
         # Do not trim it - the pattern rightly rejects a 19-char near-miss.
-        for text in ("AKIAIOSFODNN7EXAMPLE", "ghp_" + "a" * 30, "AIza" + "b" * 35):
+        for text in (
+            "AKIAIOSFODNN7EXAMPLE", "ghp_" + "a" * 30, "AIza" + "b" * 35,
+            "github_pat_" + "a" * 22, "SG." + "a" * 22 + "." + "b" * 43,
+            "key-" + "0" * 32, "dop_v1_" + "0" * 64, "hvs." + "a" * 24,
+        ):
             self.assertEqual(redact(["@secret"], text), "[SECRET]", text)
+
+    def test_jwt_standalone(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcDEF123-_"
+        self.assertEqual(redact(["@jwt"], "auth " + jwt), "auth [SECRET]")
+        # a lone eyJ word is not a JWT (needs the two dots)
+        self.assertEqual(redact(["@jwt"], "eyJustAWord"), "eyJustAWord")
 
     def test_near_miss_key_is_not_a_key(self):
         # one char short of 20: not an AWS key, and must not be reported as one
@@ -251,6 +261,81 @@ class Secrets(unittest.TestCase):
         text = "a\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n"
         _, out, _ = run(["-n", "-e", "@secret"], text)
         self.assertNotIn("MIIEow", out)
+
+
+class Field(unittest.TestCase):
+    """@field KEY redacts a named value in JSON / logfmt / header shapes."""
+
+    def test_json_string_value(self):
+        self.assertEqual(
+            redact(["@field password"], '{"password": "hunter2", "user": "bob"}'),
+            '{"password": "[REDACTED]", "user": "bob"}',
+        )
+
+    def test_json_non_string_value(self):
+        self.assertEqual(
+            redact(["@field pin"], '{"pin": 1234}'), '{"pin": "[REDACTED]"}'
+        )
+
+    def test_kv_and_query(self):
+        self.assertEqual(
+            redact(["@field password"], "level=info password=hunter2 msg=ok"),
+            "level=info password=[REDACTED] msg=ok",
+        )
+        self.assertEqual(
+            redact(["@field api_key"], "GET /a?api_key=abc123&x=1"),
+            "GET /a?api_key=[REDACTED]&x=1",
+        )
+
+    def test_header_value_with_spaces(self):
+        # the case the fixed assignment rule cannot do: value runs past a space
+        self.assertEqual(
+            redact(["@field authorization"], "Authorization: Bearer eyJx.eyJy.zzz"),
+            "Authorization: [REDACTED]",
+        )
+
+    def test_case_insensitive_key(self):
+        self.assertEqual(
+            redact(["@field authorization"], "authorization=secret"),
+            "authorization=[REDACTED]",
+        )
+
+    def test_other_keys_untouched(self):
+        self.assertEqual(
+            redact(["@field password"], "username=bob port=8080"),
+            "username=bob port=8080",
+        )
+
+    def test_needs_a_key(self):
+        # a bad -e rule warns and is skipped, like @word/@block - it does not
+        # abort the whole run
+        _, out, err = run(["-n", "-e", "@field"], "x\n")
+        self.assertIn("needs key names", err)
+        self.assertEqual(out, "x\n")
+
+
+class CardsIban(unittest.TestCase):
+    def test_creditcard_luhn_valid(self):
+        for text in ("4111 1111 1111 1111", "4111-1111-1111-1111", "4111111111111111"):
+            self.assertEqual(redact(["@creditcard"], text), "[CARD]", text)
+
+    def test_creditcard_rejects_non_luhn(self):
+        # a 16-digit id that is not a card must survive untouched
+        self.assertEqual(
+            redact(["@creditcard"], "id 1234567812345678"), "id 1234567812345678"
+        )
+
+    def test_creditcard_ignores_short_digit_runs(self):
+        self.assertEqual(redact(["@creditcard"], "port 8080 pid 4242"), "port 8080 pid 4242")
+
+    def test_iban_mod97_valid(self):
+        for text in ("DE89 3704 0044 0532 0130 00", "DE89370400440532013000"):
+            self.assertEqual(redact(["@iban"], text), "[IBAN]", text)
+
+    def test_iban_rejects_bad_checksum(self):
+        self.assertEqual(
+            redact(["@iban"], "AB12CDEF3456789012"), "AB12CDEF3456789012"
+        )
 
 
 class Phone(unittest.TestCase):
@@ -394,6 +479,39 @@ class Modes(unittest.TestCase):
         _, _, err = run(["-n", "-e", "@ip", "-AA"], "tok %s end\n" % blob)
         self.assertIn(blob, err)
         self.assertNotIn("...", err)
+
+    def test_audit_strict_exits_1_on_findings(self):
+        code, _, _ = run(["-n", "-e", "@ip", "-A", "--strict"], "call db.corp.local\n")
+        self.assertEqual(code, 1)
+
+    def test_audit_strict_exits_0_when_clean(self):
+        code, _, _ = run(["-n", "-e", "@ip", "-A", "--strict"], "nothing here\n")
+        self.assertEqual(code, 0)
+
+    def test_strict_needs_audit(self):
+        code, _, err = run(["-n", "--strict"], "x\n")
+        self.assertEqual(code, 2)
+        self.assertIn("only apply to --audit", err)
+
+    def test_entropy_flags_a_random_token(self):
+        _, _, err = run(
+            ["-n", "-e", "@ip", "-A", "--entropy"],
+            "tok Xk9Q2mZ7pR4tW1vL8sB3nH6yD5cF0jA end\n",
+        )
+        self.assertIn("high-entropy", err)
+
+    def test_entropy_is_quiet_without_the_flag(self):
+        _, _, err = run(
+            ["-n", "-e", "@ip", "-A"], "tok Xk9Q2mZ7pR4tW1vL8sB3nH6yD5cF0jA end\n"
+        )
+        self.assertNotIn("high-entropy", err)
+
+    def test_entropy_spares_ordinary_identifiers(self):
+        _, _, err = run(
+            ["-n", "-e", "@ip", "-A", "--entropy"],
+            "getUserByEmailAddressFromDatabase run\n",
+        )
+        self.assertNotIn("high-entropy", err)
 
     def test_exclusive_modes(self):
         code, _, err = run(["-n", "-c", "-d"], "x\n")
@@ -679,12 +797,20 @@ class Recursive(unittest.TestCase):
 class Profiles(unittest.TestCase):
     def test_list_profiles_finds_the_shipped_ones(self):
         _, out, _ = run(["--list-profiles"])
-        for name in ("webserver", "sshd", "dhcpd", "ftp", "mail", "configfiles"):
+        for name in ("webserver", "sshd", "dhcpd", "ftp", "mail", "configfiles",
+                     "secrets"):
             self.assertIn(name, out)
 
     def test_webserver_profile_redacts_query_token(self):
         _, out, _ = run(["-n", "-p", "webserver"], "GET /a?token=abc123\n")
         self.assertIn("[SECRET]", out)
+
+    def test_secrets_profile_redacts_vendor_token_and_field(self):
+        _, out, _ = run(["-n", "-p", "secrets"], "k ghp_%s\n" % ("a" * 30))
+        self.assertIn("[SECRET]", out)
+        # @field pulls its weight where @secret's shape net does not: a JSON value
+        _, out, _ = run(["-n", "-p", "secrets"], '{"password": "hunter2"}\n')
+        self.assertEqual(out, '{"password": "[REDACTED]"}\n')
 
     def test_unknown_profile_fails(self):
         code, _, _ = run(["-n", "-p", "doesnotexist"], "x\n")
@@ -725,7 +851,8 @@ class Meta(unittest.TestCase):
         for flag in ("--expr", "--file", "--profile", "--list-profiles", "--ask",
                      "--blank", "--keep-length", "--in-place", "--recursive",
                      "--exclude", "--include", "--diff", "--check",
-                     "--audit", "--audit-all", "--map", "--unredact", "--stats",
+                     "--audit", "--audit-all", "--strict", "--entropy",
+                     "--map", "--unredact", "--stats",
                      "--list-rules", "--no-config", "--version"):
             self.assertIn(flag.replace("-", "\\-"), page, flag)
 

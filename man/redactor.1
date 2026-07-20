@@ -42,7 +42,7 @@ Load an additional rule file. Repeatable.
 .TP
 .BR \-p ", " \-\-profile " \fINAME\fR"
 Load a ready-made rule set: \fBwebserver\fR, \fBsshd\fR, \fBdhcpd\fR,
-\fBftp\fR, \fBmail\fR, \fBconfigfiles\fR. Repeatable. Loaded before
+\fBftp\fR, \fBmail\fR, \fBconfigfiles\fR, \fBsecrets\fR. Repeatable. Loaded before
 .BR \-f ,
 so your own rule files can extend a profile.
 .TP
@@ -136,6 +136,17 @@ so the report stays skimmable.
 Same audit, but without the summary: list every value in every category at full
 length, with no five-per-category cap and no clipping. Use it once \fB\-A\fR has
 told you a category is worth reading in full.
+.TP
+.B \-\-strict
+With \fB\-\-audit\fR, exit 1 when anything is found instead of always 0, so the
+audit net for \fIunknown\fR shapes can gate a commit or a CI run the way
+\fB\-\-check\fR does for the known ones.
+.TP
+.B \-\-entropy
+With \fB\-\-audit\fR, additionally flag high-entropy, token-like strings: the net
+for a credential whose shape no pattern knows. Conservative on purpose
+(camelCase identifiers and short hashes stay quiet), and off by default because
+it is the noisiest of the audit checks.
 .TP
 .BR \-s ", " \-\-stats
 After processing, print the match count per rule to standard error.
@@ -263,6 +274,38 @@ hashes, \fBpassword=\fR assignments, SNMP community strings and whole private
 key blocks \(-> \fB[SECRET]\fR. Not pseudonymized and not reversible: a token
 should be gone, not correlated. Deliberately trigger-happy \(em in code it also
 hits \fBtoken = get_token()\fR.
+.TP
+.B @jwt
+Just the JWT part of
+.B @secret
+(\fBeyJ...\fR.\fBeyJ...\fR.\fBsig\fR) \(-> \fB[SECRET]\fR, for when you want to
+strip JSON Web Tokens without the rest of the secret machinery.
+.TP
+.BR @field " \fIKEY\fR..."
+Redact the \fIvalue\fR of a named field, whatever shape it has \(->
+\fB[REDACTED]\fR. Where
+.B @secret
+matches by the value's shape, this matches by the key, for sensitive values with
+no shape of their own. Case-insensitive on the key, one-way, and it understands
+three syntaxes at once:
+.RS
+.IP \(bu 2
+JSON: \fB"KEY": "value"\fR
+.IP \(bu 2
+logfmt / query string: \fBKEY=value\fR
+.IP \(bu 2
+HTTP header / YAML: \fBKEY: value to end of line\fR (so \fBAuthorization: Bearer
+x\fR is caught whole, spaces and all)
+.RE
+.TP
+.B @creditcard
+Card numbers (13\(en19 digits, spaced or dashed) that pass the Luhn check \(->
+\fB[CARD]\fR. The checksum is the gate: a 16-digit id that is not a card fails it
+and is left untouched.
+.TP
+.B @iban
+IBAN account numbers that pass the mod-97 checksum \(-> \fB[IBAN]\fR. Same idea:
+a random \fBAT..\fR string that fails the check is not touched.
 .TP
 .BR @keep " \fIVALUE\fR..."
 The opposite: never replace these. Without it,

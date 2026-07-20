@@ -10,7 +10,7 @@ _redactor() {
     opts="-e --expr -f --file -p --profile --list-profiles
           -a --ask -b --blank -k --keep-length
           -i --in-place -r --recursive --exclude --include
-          -d --diff -c --check -A --audit --audit-all
+          -d --diff -c --check -A --audit --audit-all --strict --entropy
           -m --map -u --unredact
           -s --stats -l --list-rules -n --no-config
           -V --version -h --help"
@@ -21,7 +21,8 @@ _redactor() {
     # @url is an alias for @uri -- listed because it is accepted, and completion
     # should offer what the parser takes, not what we wish it took.
     local builtins="@ip @ipv6 @email @mac @hostname @user @uri @url @path
-                    @sshkey @phone @secret @word @keep @block"
+                    @sshkey @phone @secret @jwt @field @creditcard @iban
+                    @word @keep @block"
 
     case "$prev" in
         -p|--profile)

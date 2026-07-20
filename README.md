@@ -287,6 +287,10 @@ These detect a whole category and assign a **stable** pseudonym per distinct val
 | `@sshkey` | `SHA256:47DEQ...`, `ssh-rsa AAAA...` → `sshkey1` |
 | `@phone` | `+41 79 123 45 67` → `phone1` (international only; national per country) |
 | `@secret` | API keys, tokens, hashes, `password=…` → `[SECRET]` |
+| `@jwt` | JSON Web Tokens `eyJ….eyJ….sig` → `[SECRET]` |
+| `@field KEY…` | a named field's value (JSON / `key=` / header) → `[REDACTED]` |
+| `@creditcard` | 13–19 digits passing Luhn → `[CARD]` |
+| `@iban` | IBANs passing the mod-97 check → `[IBAN]` |
 | `@keep` | the opposite: **never** replace these values |
 
 `@hostname`, `@user` and `@sshkey` are **word-bounded automatically**.
@@ -447,7 +451,7 @@ reversible with `--unredact`.
 
 | detected | example |
 |---|---|
-| Vendor tokens | `AKIA…`, `ghp_…`, `glpat-…`, `xoxb-…`, `AIza…`, `sk_live_…`, `sk-…`, `npm_…` |
+| Vendor tokens | `AKIA…`, `ghp_…`, `github_pat_…`, `glpat-…`, `xoxb-…`, `AIza…`, `ya29.…`, `sk_live_…`, `sk-…`, `npm_…`, `SG.…`, `key-…` (Mailgun), `dop_v1_…`, `hvs.…` (Vault), `shpat_…`, `sq0…` |
 | JWTs | `eyJhbGci….eyJzdWI….xxx` |
 | **Query parameters** | `?token=abc`, `&api_key=xyz`, `&session=…` |
 | Bearer / Basic | `Authorization: Bearer …`, `Basic dXNlcjpwdw==` |
@@ -466,6 +470,38 @@ publishing it is publishing the password with a delay.
 > **`@secret` is deliberately trigger-happy.** In code the assignment rule also hits
 > `token = get_token()` → `token = [SECRET]`. Over-redacting is cosmetic; a live key that
 > slipped through is not. Check with `--diff` or `--stats`.
+
+`@jwt` is the JWT part of `@secret` on its own, for when you want to strip tokens and
+nothing else. The ready-made **`secrets` profile** bundles `@secret` with `@field` for the
+common auth keys — `redactor -p secrets` is the "scrub the credentials before I paste this"
+button.
+
+### `@field KEY…` — redact a value by its key
+
+`@secret` matches by the value's **shape** (`AKIA…`, `eyJ…`). But the most sensitive values
+have no shape — a password, a session token, an `X-Api-Key`. `@field` matches by the **key**
+instead, and understands the three ways a key/value pair is written:
+
+```bash
+redactor -e '@field password authorization api_key' app.log
+```
+
+| input | output |
+|---|---|
+| `{"password": "hunter2"}` | `{"password": "[REDACTED]"}` |
+| `password=hunter2` / `?api_key=abc&x=1` | `password=[REDACTED]` / `?api_key=[REDACTED]&x=1` |
+| `Authorization: Bearer eyJ… x` | `Authorization: [REDACTED]` |
+
+The header form runs to the end of the line, so a value with spaces (`Bearer x`) is caught
+whole — the one thing `@secret`'s fixed `assignment` rule can't do. Case-insensitive on the
+key, one-way (not restored by `--unredact`).
+
+### `@creditcard` / `@iban` — checksum-gated PII
+
+Both are pure digits, the false-positive minefield `@phone` lives in — so each is gated on a
+**checksum**. `@creditcard` (13–19 digits, spaced or dashed) only fires when the number
+passes **Luhn**; a 16-digit id that isn't a card is left alone. `@iban` validates **mod-97**.
+Fixed markers `[CARD]` / `[IBAN]`, one-way.
 
 ## 4. Regex
 
@@ -512,6 +548,8 @@ the remainder stays redacted — when in doubt, too much.
 | `-c`, `--check` | check only, exit 1 on any match |
 | `-A`, `--audit` | report what looks sensitive and has no rule |
 | `-AA`, `--audit-all` | same, but list every finding in full (no cap, no clipping) |
+| `--strict` | with `--audit`, exit 1 on any finding (gate a commit / CI) |
+| `--entropy` | with `--audit`, also flag high-entropy token-like strings |
 | `-m PATH`, `--map` | keep the mapping persistent |
 | `-u`, `--unredact` | apply the map backwards |
 | `-s`, `--stats` | match count per rule to stderr |
@@ -603,6 +641,18 @@ redactor -p webserver --audit-all access.log  # the whole list, untruncated
 It looks for: internal hostnames (`.local`, `.corp`, `.lan`, …), domains, e-mail
 addresses, IPs, MACs, URL hosts, home paths, SSH keys, long digit runs (9+), hex blobs
 (32+), base64 blobs (24+) and `-----BEGIN` markers.
+
+Two modifiers make audit do more than talk:
+
+```bash
+redactor -A --strict  file    # exit 1 if anything was found — gate a commit / CI
+redactor -A --entropy file    # also flag high-entropy token-like strings
+```
+
+`--strict` turns audit into a gate for the **unknown** shapes, the way `--check` gates the
+known ones. `--entropy` adds the net for credentials whose shape no pattern knows — a random
+API key gets flagged on its randomness alone. It is conservative (a camelCase identifier
+stays quiet) and off by default because it is the noisiest of the checks.
 
 ## `-p` / `--profile`
 

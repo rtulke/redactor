@@ -42,6 +42,10 @@ Rule syntax (one rule per line; also used as the value for -e):
     @phone                               # +41 79 123 45 67 -> phoneN (international only)
     @phone ch de                         # ...plus these countries' national formats
     @secret                              # api keys, tokens, password=... -> [SECRET]
+    @jwt                                 # JSON Web Tokens eyJ..eyJ..sig -> [SECRET]
+    @field password authorization        # a named field's value (json/kv/header) -> [REDACTED]
+    @creditcard                          # 13-19 digits passing Luhn -> [CARD]
+    @iban                                # IBANs passing the mod-97 check -> [IBAN]
 
     @keep 127.0.0.1 localhost github.com # never redact these, they are public
 
@@ -75,6 +79,7 @@ import difflib
 import fnmatch
 import getpass
 import json
+import math
 import os
 import re
 import shutil
@@ -97,7 +102,7 @@ DEFAULT_REPLACEMENT = "[REDACTED]"
 BUILTINS = (
     "ip", "ipv6", "email", "mac", "hostname", "user",
     "word", "secret", "uri", "url", "path", "block", "sshkey",
-    "phone", "keep",
+    "phone", "keep", "jwt", "field", "creditcard", "iban",
 )
 
 # Values @keep marked as public.  Consulted at match time, so a @keep anywhere
@@ -311,6 +316,62 @@ PHONE_NATIONAL = {
 def _phone_pseudo(n):
     return "phone%d" % n
 
+
+# @creditcard / @iban - like @phone, a shape made only of digits is a minefield
+# of false positives, so both gate on a checksum: a 16-digit id that is not a
+# card fails Luhn, a random AT.. string fails mod-97, and neither is touched.
+# Fixed markers, not pseudonyms: for a card or an account number you want it
+# gone, never correlated.
+CREDITCARD_RE = re.compile(r"(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)")
+IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b")
+
+
+def _luhn_ok(digits):
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = ord(ch) - 48
+        if alt:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+        alt = not alt
+    return total % 10 == 0
+
+
+def _creditcard_repl(match):
+    text = match.group(0)
+    digits = re.sub(r"\D", "", text)
+    if 13 <= len(digits) <= 19 and _luhn_ok(digits):
+        return "[CARD]"
+    return text  # a long id or a phone number, not a card
+
+
+def _iban_ok(value):
+    value = value.replace(" ", "").upper()
+    if not 15 <= len(value) <= 34:
+        return False
+    rearranged = value[4:] + value[:4]
+    digits = []
+    for ch in rearranged:
+        if ch.isdigit():
+            digits.append(ch)
+        elif "A" <= ch <= "Z":
+            digits.append(str(ord(ch) - 55))  # A=10 .. Z=35
+        else:
+            return False
+    return int("".join(digits)) % 97 == 1
+
+
+def _iban_repl(match):
+    text = match.group(0)
+    return "[IBAN]" if _iban_ok(text) else text
+
+# A JWT is header.payload.signature, and the header and payload both start with
+# eyJ because they base64url-encode a JSON object ('{"').  Shared by @secret and
+# the standalone @jwt builtin.
+JWT_PATTERN = r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+"
+
 # @secret: credentials get a fixed marker, not a pseudonym - for a token you
 # want it gone, you never want to correlate it.  Deliberately trigger-happy:
 # over-redacting is cosmetic, missing a live key is not.
@@ -327,8 +388,17 @@ SECRET_PATTERNS = [
      ("sk_live_", "rk_live_")),
     ("openai-key", r"\bsk-[A-Za-z0-9_-]{20,}\b", "[SECRET]", ("sk-",)),
     ("npm-token", r"\bnpm_[A-Za-z0-9]{30,}\b", "[SECRET]", ("npm_",)),
-    ("jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+", "[SECRET]",
-     ("eyj",)),
+    ("github-fine", r"\bgithub_pat_[A-Za-z0-9_]{22,}\b", "[SECRET]", ("github_pat_",)),
+    ("google-oauth", r"\bya29\.[A-Za-z0-9_-]{20,}", "[SECRET]", ("ya29.",)),
+    ("sendgrid-key", r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b", "[SECRET]",
+     ("sg.",)),
+    ("mailgun-key", r"\bkey-[0-9a-f]{32}\b", "[SECRET]", ("key-",)),
+    ("digitalocean", r"\bdop_v1_[0-9a-f]{64}\b", "[SECRET]", ("dop_v1_",)),
+    ("vault-token", r"\bhvs\.[A-Za-z0-9_-]{24,}", "[SECRET]", ("hvs.",)),
+    ("shopify-token", r"\bshp(?:at|ca|pa|ss)_[0-9a-f]{32}\b", "[SECRET]", ("shp",)),
+    ("square-token", r"\bsq0(?:atp|csp)-[0-9A-Za-z_-]{22,}", "[SECRET]", ("sq0",)),
+    ("twilio-key", r"\bSK[0-9a-f]{32}\b", "[SECRET]", ("sk",)),
+    ("jwt", JWT_PATTERN, "[SECRET]", ("eyj",)),
 
     # --- HTTP: what actually leaks in apache/nginx logs
     # A query string in an access log has no scheme, so @uri never sees it:
@@ -437,25 +507,51 @@ AUDIT_PATTERNS = [
     ("key-marker", re.compile(r"-----BEGIN [A-Z0-9 ]+-----"), 0),
 ]
 
+# --entropy: the shape patterns above are a net for KNOWN token shapes; this is
+# the net for the ones with no shape at all - a random API key or password in a
+# format nobody wrote a pattern for.  A run of token characters with high Shannon
+# entropy (bits/char) is what a credential looks like and ordinary text does not.
+# Threshold and length are deliberately conservative so camelCase identifiers and
+# short hashes stay quiet; opt-in because it is the noisiest of the audit checks.
+ENTROPY_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{20,}(?![A-Za-z0-9+/=_-])")
+ENTROPY_MIN_BITS = 4.2
+
+
+def _shannon(s):
+    """Shannon entropy of s in bits per character (0 for a constant string)."""
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
 
 class Auditor:
     """Collects suspicious values that no rule touched."""
 
-    def __init__(self, position):
+    def __init__(self, position, entropy=False):
         self.position = position
+        self.entropy = entropy
         self.findings = {}  # kind -> {value: [count, first_seen]}
+
+    def _note(self, kind, value):
+        seen = self.findings.setdefault(kind, {})
+        if value in seen:
+            seen[value][0] += 1
+        else:
+            seen[value] = [1, str(self.position)]
 
     def scan(self, text):
         for kind, regex, group in AUDIT_PATTERNS:
             for match in regex.finditer(text):
                 value = match.group(group)
-                if not value:
-                    continue
-                seen = self.findings.setdefault(kind, {})
-                if value in seen:
-                    seen[value][0] += 1
-                else:
-                    seen[value] = [1, str(self.position)]
+                if value:
+                    self._note(kind, value)
+        if self.entropy:
+            for match in ENTROPY_RE.finditer(text):
+                value = match.group(0)
+                if _shannon(value) >= ENTROPY_MIN_BITS:
+                    self._note("high-entropy", value)
 
     def report(self, store, out, full=False):
         # Anything we produced ourselves is not a finding: our own placeholders
@@ -825,6 +921,55 @@ def _phone_repl(mapper):
     return repl
 
 
+def _field_rule(keys, source):
+    """@field KEY... - redact a named field's VALUE, whatever shape it has.
+
+    Where @secret matches by the value's shape (AKIA.., eyJ..), @field matches by
+    the key, for the sensitive values that have no shape at all - a password,
+    a session token, an X-Api-Key header.  The assignment rule inside @secret
+    does this too, but only for a fixed built-in key list; here the keys are
+    yours.  Each key becomes three rules, one per syntax, so the same @field
+    authorization catches all of:
+
+        {"authorization": "Bearer x"}         JSON
+        authorization=Bearer%20x              logfmt / query string
+        Authorization: Bearer eyJ...          HTTP header / YAML
+
+    Case-insensitive on the key.  One-way: the value is replaced with a fixed
+    marker, not a pseudonym, so --unredact does not bring it back."""
+    mark = DEFAULT_REPLACEMENT
+    rules = []
+    for key in keys:
+        k = re.escape(key)
+        gate = (key.lower(),)
+        # JSON scalar: "key": "v" | 123 | true | null  ->  "key": "[REDACTED]"
+        rules.append(Rule(
+            "@field %s (json)" % key,
+            re.compile(
+                r'("%s"\s*:\s*)(?:"[^"]*"|-?\d[\d.eE+-]*|true|false|null)' % k, re.I
+            ),
+            r'\1"%s"' % mark,
+            source, gate,
+        ))
+        # logfmt / query string: key=value | key="value"  ->  key=[REDACTED]
+        rules.append(Rule(
+            "@field %s (kv)" % key,
+            re.compile(r'((?<!\w)%s\s*=\s*)(?:"[^"]*"|[^\s,;&]+)' % k, re.I),
+            r"\1%s" % mark,
+            source, gate,
+        ))
+        # header / yaml: key: value-to-end-of-line  ->  key: [REDACTED]
+        # value may hold spaces ("Bearer x"), so it runs to a comma or the line
+        # end; the quoted alternative keeps a JSON "key": from over-reaching.
+        rules.append(Rule(
+            "@field %s (colon)" % key,
+            re.compile(r'((?<!\w)%s\s*:\s*)(?:"[^"]*"|[^\n,]+)' % k, re.I),
+            r"\1%s" % mark,
+            source, gate,
+        ))
+    return rules
+
+
 def _default_hostnames():
     names = []
     try:
@@ -956,6 +1101,22 @@ def _builtin(name, args, source):
             for (lbl, start, end, repl, gates) in SECRET_BLOCKS
         ]
         return rules
+
+    if name == "jwt":
+        return [Rule("@jwt", re.compile(JWT_PATTERN), "[SECRET]", source, ("eyj",))]
+
+    if name == "field":
+        if not args:
+            raise ValueError(
+                "@field needs key names: @field password authorization api_key"
+            )
+        return _field_rule(args, source)
+
+    if name == "creditcard":
+        return [Rule("@creditcard", CREDITCARD_RE, _creditcard_repl, source)]
+
+    if name == "iban":
+        return [Rule("@iban", IBAN_RE, _iban_repl, source)]
 
     if name == "block":
         if len(args) < 2:
@@ -1597,6 +1758,16 @@ def main(argv=None):
              "category at full length (no top-5 cap, no clipping). Same as -AA",
     )
     parser.add_argument(
+        "--strict", action="store_true",
+        help="with --audit, exit 1 when anything is found (so audit can gate a "
+             "commit or CI run, like --check does for the known shapes)",
+    )
+    parser.add_argument(
+        "--entropy", action="store_true",
+        help="with --audit, additionally flag high-entropy token-like strings - "
+             "the net for credentials whose shape no pattern knows",
+    )
+    parser.add_argument(
         "-l", "--list-rules", action="store_true",
         help="print the loaded rules (with their source) and exit",
     )
@@ -1633,6 +1804,8 @@ def main(argv=None):
         parser.error("-i/--in-place needs file arguments, it cannot rewrite a pipe")
     if args.unredact and (args.blank or args.check or args.audit):
         parser.error("--unredact cannot be combined with -b/--blank, --check or --audit")
+    if (args.strict or args.entropy) and not args.audit:
+        parser.error("--strict and --entropy only apply to --audit")
 
     # -r expands directory arguments into their files, so everything downstream
     # (-i/-d/-c/-A and plain stdout alike) just sees a flat list of files.  A
@@ -1727,7 +1900,7 @@ def main(argv=None):
             wrap_for_ask(rule, asker)
 
     processor = Processor(lines, blocks, asker)
-    auditor = Auditor(position) if args.audit else None
+    auditor = Auditor(position, entropy=args.entropy) if args.audit else None
 
     def run(source, path, emit):
         processor.reset()
@@ -1812,8 +1985,8 @@ def main(argv=None):
         STORE.save()
 
     if args.audit:
-        auditor.report(STORE, sys.stderr, full=audit_full)
-        return 0
+        found = auditor.report(STORE, sys.stderr, full=audit_full)
+        return 1 if (args.strict and found) else 0
 
     if args.in_place:
         sys.stderr.write(
