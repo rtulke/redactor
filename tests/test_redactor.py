@@ -870,8 +870,8 @@ class Meta(unittest.TestCase):
             tree = ast.parse(fh.read())
         allowed = set(sys.stdlib_module_names) if hasattr(
             sys, "stdlib_module_names") else {
-            "argparse", "difflib", "getpass", "json", "os", "re", "shutil",
-            "socket", "sys",
+            "argparse", "difflib", "fnmatch", "getpass", "json", "math", "os",
+            "re", "shutil", "socket", "sys",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

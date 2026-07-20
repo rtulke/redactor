@@ -82,6 +82,8 @@ contents:
     dst: /usr/share/redactor/profiles/mail.conf
   - src: ./profiles/configfiles.conf
     dst: /usr/share/redactor/profiles/configfiles.conf
+  - src: ./profiles/secrets.conf
+    dst: /usr/share/redactor/profiles/secrets.conf
 
   - src: ./LICENSE
     dst: /usr/share/doc/redactor/LICENSE
