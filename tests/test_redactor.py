@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -879,6 +880,373 @@ class Meta(unittest.TestCase):
                     self.assertIn(alias.name.split(".")[0], allowed, alias.name)
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 self.assertIn(node.module.split(".")[0], allowed, node.module)
+
+
+class _ScriptedTty:
+    """Stands in for /dev/tty in --ask tests.
+
+    write() collects the dialog, readline() feeds scripted answers; an
+    exhausted script reads as EOF, which the Asker treats as 'yes to all'."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.written = []
+
+    def write(self, text):
+        self.written.append(text)
+
+    def flush(self):
+        pass
+
+    def readline(self):
+        return self.answers.pop(0) if self.answers else ""
+
+    def text(self):
+        return "".join(self.written)
+
+
+def scripted_asker(answers):
+    """Patch Asker.__init__ so it talks to a _ScriptedTty instead of /dev/tty."""
+    tty = _ScriptedTty(answers)
+
+    def fake_init(self, position):
+        self.position = position
+        self.yes_to_all = False
+        self._tty = tty
+
+    return mock.patch.object(redactor.Asker, "__init__", fake_init), tty
+
+
+class Ask(unittest.TestCase):
+    """-a/--ask. A wrong answer-handling here silently ships the wrong data,
+    in both directions: y that acts like n leaves real values in, n that acts
+    like y destroys text the user wanted to keep."""
+
+    def ask(self, answers, rules, text):
+        patch, tty = scripted_asker(answers)
+        argv = ["-n", "-a"]
+        for rule in rules:
+            argv += ["-e", rule]
+        with patch:
+            code, out, err = run(argv, text)
+        return code, out, tty
+
+    def test_yes_replaces_no_keeps(self):
+        _, out, tty = self.ask(["y\n", "n\n"], ["@ip"], "from 1.1.1.1 to 2.2.2.2\n")
+        self.assertEqual(out, "from 10.0.0.1 to 2.2.2.2\n")
+        self.assertIn("[@ip]", tty.text())        # the prompt names the rule
+        self.assertIn("'1.1.1.1'", tty.text())    # ...and shows the value
+
+    def test_enter_means_yes(self):
+        _, out, _ = self.ask(["\n"], ["@ip"], "ping 1.1.1.1\n")
+        self.assertEqual(out, "ping 10.0.0.1\n")
+
+    def test_all_stops_asking(self):
+        _, out, tty = self.ask(["a\n"], ["@ip"], "1.1.1.1 2.2.2.2 3.3.3.3\n")
+        self.assertEqual(out, "10.0.0.1 10.0.0.2 10.0.0.3\n")
+        # one prompt, not three: 'a' must suppress the rest
+        self.assertEqual(tty.text().count("replace?"), 1)
+
+    def test_eof_on_tty_means_yes_to_all(self):
+        # ^D on the terminal: stop asking, keep redacting - never pass data through
+        _, out, _ = self.ask([], ["@ip"], "1.1.1.1 and 2.2.2.2\n")
+        self.assertEqual(out, "10.0.0.1 and 10.0.0.2\n")
+
+    def test_garbage_reprompts(self):
+        _, out, tty = self.ask(["x\n", "n\n"], ["@ip"], "ping 1.1.1.1\n")
+        self.assertEqual(out, "ping 1.1.1.1\n")   # the real answer was n
+        self.assertIn("answer y (yes), n (no)", tty.text())
+
+    def test_block_is_asked_once_as_a_whole(self):
+        _, out, tty = self.ask(
+            ["y\n"], ["@block /BEGIN/ /END/ [GONE]"], "BEGIN\nsecret\nEND\ntail\n"
+        )
+        self.assertNotIn("secret", out)
+        self.assertIn("tail", out)
+        self.assertIn("3 line block", tty.text())
+        self.assertEqual(tty.text().count("replace?"), 1)
+
+    def test_block_answer_no_keeps_the_block(self):
+        _, out, _ = self.ask(
+            ["n\n"], ["@block /BEGIN/ /END/ [GONE]"], "BEGIN\nsecret\nEND\n"
+        )
+        self.assertEqual(out, "BEGIN\nsecret\nEND\n")
+
+    def test_ask_needs_a_terminal(self):
+        # in a pipe with no controlling terminal -a must refuse loudly, not hang
+        with mock.patch("builtins.open", side_effect=OSError("no tty")):
+            with self.assertRaises(SystemExit):
+                redactor.Asker(redactor.Position())
+
+
+class ConfigDiscovery(unittest.TestCase):
+    """The documented load order: /etc -> XDG -> .redactor walking up.
+
+    Every other test passes -n precisely to keep this machinery out; these are
+    the only ones exercising it. /etc/redactor.conf stays untested - writing
+    there is not something a test suite should do."""
+
+    def setUp(self):
+        self._cwd = os.getcwd()
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+
+    def _tree(self):
+        base = tempfile.mkdtemp()
+        nested = os.path.join(base, "a", "b")
+        os.makedirs(nested)
+        return base, nested
+
+    def test_walk_up_finds_the_nearest_file(self):
+        base, nested = self._tree()
+        expected = os.path.join(base, ".redactor")
+        with open(expected, "w") as fh:
+            fh.write("# empty\n")
+        os.chdir(nested)
+        self.assertEqual(
+            os.path.realpath(redactor._walk_up(".redactor")),
+            os.path.realpath(expected),
+        )
+
+    def test_walk_up_returns_none_without_one(self):
+        base, nested = self._tree()
+        os.chdir(nested)
+        self.assertIsNone(redactor._walk_up(".redactor-no-such-file"))
+
+    def test_find_config_files_orders_xdg_before_local(self):
+        base, nested = self._tree()
+        xdg = os.path.join(base, "xdg")
+        os.makedirs(xdg)
+        xdg_conf = os.path.join(xdg, "redactor.conf")
+        local_conf = os.path.join(base, ".redactor")
+        for path in (xdg_conf, local_conf):
+            with open(path, "w") as fh:
+                fh.write("# empty\n")
+        os.chdir(nested)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": xdg}):
+            found = [os.path.realpath(p) for p in redactor.find_config_files()]
+        # /etc/redactor.conf may or may not exist on the machine running this;
+        # the order of the two entries we control is the contract
+        self.assertEqual(
+            found[-2:], [os.path.realpath(xdg_conf), os.path.realpath(local_conf)]
+        )
+
+    def test_rules_apply_in_documented_order(self):
+        # XDG says cfgalpha->cfgbeta, the project file says cfgbeta->cfggamma.
+        # Only "XDG first, then .redactor, each on the previous output" yields
+        # cfggamma; any other order or a missing file yields something else.
+        base, nested = self._tree()
+        xdg = os.path.join(base, "xdg")
+        os.makedirs(xdg)
+        with open(os.path.join(xdg, "redactor.conf"), "w") as fh:
+            fh.write("cfgalpha cfgbeta\n")
+        with open(os.path.join(base, ".redactor"), "w") as fh:
+            fh.write("cfgbeta cfggamma\n")
+        os.chdir(nested)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": xdg}):
+            _, out, _ = run([], "cfgalpha\n")
+        self.assertEqual(out, "cfggamma\n")
+
+    def test_no_config_switches_discovery_off(self):
+        base, nested = self._tree()
+        xdg = os.path.join(base, "xdg")
+        os.makedirs(xdg)
+        with open(os.path.join(xdg, "redactor.conf"), "w") as fh:
+            fh.write("cfgalpha cfgbeta\n")
+        os.chdir(nested)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": xdg}):
+            _, out, _ = run(["-n"], "cfgalpha\n")
+        self.assertEqual(out, "cfgalpha\n")
+
+
+class DefaultIdentities(unittest.TestCase):
+    """@hostname / @user without arguments take this machine's identity.
+
+    Mocked, not read from the machine: on a developer box the real hostname
+    would make these tests assert different things for every person running
+    them - the exact failure mode the -n convention exists to avoid."""
+
+    def test_hostname_defaults_to_this_host(self):
+        with mock.patch.object(redactor.socket, "getfqdn",
+                               return_value="web01.corp.local"), \
+             mock.patch.object(redactor.socket, "gethostname",
+                               return_value="web01"):
+            out = redact(["@hostname"], "reboot web01.corp.local then web01")
+        self.assertEqual(out, "reboot host1 then host2")
+
+    def test_hostname_default_is_word_bounded(self):
+        with mock.patch.object(redactor.socket, "getfqdn", return_value="web01"), \
+             mock.patch.object(redactor.socket, "gethostname",
+                               return_value="web01"):
+            out = redact(["@hostname"], "web019 is a different machine")
+        self.assertEqual(out, "web019 is a different machine")
+
+    def test_user_defaults_to_current_user(self):
+        with mock.patch.object(redactor.getpass, "getuser", return_value="alice"):
+            out = redact(["@user"], "alice logged in, malice did not")
+        self.assertEqual(out, "user1 logged in, malice did not")
+
+
+class ListRules(unittest.TestCase):
+    """-l/--list-rules. The code's own contract: "why was that not redacted?"
+    must be answerable from this output alone."""
+
+    def test_lists_rules_with_their_source(self):
+        code, out, _ = run(["-n", "-e", "@ip", "-l"])
+        self.assertEqual(code, 0)
+        self.assertIn("@ip", out)
+        self.assertIn("-e", out)
+
+    def test_keep_values_are_never_implicit(self):
+        _, out, _ = run(["-n", "-e", "@ip", "-e", "@keep localhost", "-l"])
+        self.assertIn("@keep", out)
+        self.assertIn("localhost", out)
+
+    def test_mapping_is_shown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "test.map")
+            with open(path, "w") as fh:
+                json.dump({"ip": {"1.2.3.4": "10.0.0.1"}}, fh)
+            _, out, _ = run(["-n", "-e", "@ip", "-m", path, "-l"])
+        self.assertIn("(mapping)", out)
+        self.assertIn(path, out)
+
+    def test_no_rules_says_so(self):
+        code, out, _ = run(["-n", "-l"])
+        self.assertEqual(code, 0)
+        self.assertIn("(no rules loaded)", out)
+
+
+class Ipv6(unittest.TestCase):
+    def test_full_and_compressed_forms(self):
+        out = redact(["@ipv6"], "fe80::1 peer 2001:db8:85a3::8a2e:370:7334")
+        self.assertEqual(out, "fd00::1 peer fd00::2")
+
+    def test_ip_covers_v6_too(self):
+        self.assertEqual(redact(["@ip"], "via 2001:db8::1"), "via fd00::1")
+
+    def test_colons_alone_are_not_an_address(self):
+        # logs and code are full of colon-separated things that are not IPv6
+        text = "12:34:56 std::vector took 00:01"
+        self.assertEqual(redact(["@ipv6"], text), text)
+
+
+class _ExplodingStdout:
+    """A stdout whose write() raises, for the signal/pipe exits in main()."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def write(self, text):
+        raise self.exc
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class ErrorPaths(unittest.TestCase):
+    def _main_with_stdout(self, stdout):
+        old = sys.stdin, sys.stdout, sys.stderr
+        sys.stdin = io.StringIO("robert\n")
+        sys.stdout = stdout
+        sys.stderr = io.StringIO()
+        try:
+            return redactor.main(["-n", "-e", "robert user1"])
+        finally:
+            sys.stdin, sys.stdout, sys.stderr = old
+
+    def test_block_needs_two_markers(self):
+        code, out, err = run(["-n", "-e", "@block /x/"], "data\n")
+        self.assertIn("@block needs", err)
+        self.assertEqual(out, "data\n")  # bad rule dropped, input passed through
+
+    def test_missing_rule_file_is_reported(self):
+        _, out, err = run(["-n", "-f", "/no/such/rules.conf"], "x\n")
+        self.assertIn("rule file not found", err)
+        self.assertEqual(out, "x\n")
+
+    def test_bad_line_in_rule_file_skips_only_that_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "rules.conf")
+            with open(path, "w") as fh:
+                fh.write("/[bad/ X\nfoo bar\n")
+            _, out, err = run(["-n", "-f", path], "foo\n")
+        self.assertIn(":1:", err)           # file and line of the broken rule
+        self.assertEqual(out, "bar\n")      # the rule after it still applies
+
+    def test_unreadable_input_file_exits_2(self):
+        code, _, err = run(["-n", "-e", "@ip", "/no/such/input.log"])
+        self.assertEqual(code, 2)
+        self.assertIn("redactor:", err)
+
+    def test_empty_map_on_unredact_warns_and_passes_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "empty.map")
+            with open(path, "w") as fh:
+                fh.write("{}")
+            _, out, err = run(["-n", "-u", "-m", path], "x\n")
+        self.assertIn("nothing to undo", err)
+        self.assertEqual(out, "x\n")
+
+    def test_broken_pipe_is_a_quiet_success(self):
+        # redactor | head must not stack-trace when head exits first
+        self.assertEqual(
+            self._main_with_stdout(_ExplodingStdout(BrokenPipeError())), 0
+        )
+
+    def test_keyboard_interrupt_exits_130(self):
+        self.assertEqual(
+            self._main_with_stdout(_ExplodingStdout(KeyboardInterrupt())), 130
+        )
+
+
+class FileModes(unittest.TestCase):
+    """File arguments without -i: stdout, --diff, --check and --audit all
+    read the file and must leave it untouched on disk."""
+
+    def _file(self, tmp, content="ping 192.168.1.50\n"):
+        path = os.path.join(tmp, "input.log")
+        with open(path, "w") as fh:
+            fh.write(content)
+        return path
+
+    def test_plain_file_goes_to_stdout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp)
+            _, out, _ = run(["-n", "-e", "@ip", path])
+            with open(path) as fh:
+                on_disk = fh.read()
+        self.assertEqual(out, "ping 10.0.0.1\n")
+        self.assertEqual(on_disk, "ping 192.168.1.50\n")  # only -i writes back
+
+    def test_diff_names_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp)
+            _, out, _ = run(["-n", "-e", "@ip", "-d", path])
+        self.assertIn(path, out)
+        self.assertIn("-ping 192.168.1.50", out)
+        self.assertIn("+ping 10.0.0.1", out)
+
+    def test_check_on_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp)
+            code, out, _ = run(["-n", "-e", "@ip", "-c", path])
+            with open(path) as fh:
+                on_disk = fh.read()
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertEqual(on_disk, "ping 192.168.1.50\n")
+
+    def test_audit_on_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._file(tmp, "call db.corp.local now\n")
+            code, _, err = run(["-n", "-e", "@ip", "-A", path])
+        self.assertEqual(code, 0)
+        self.assertIn("internal-host", err)
 
 
 if __name__ == "__main__":
