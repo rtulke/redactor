@@ -115,7 +115,12 @@ Ersparnis nicht wert.
 ```bash
 cat /var/log/messages | redactor | less
 journalctl -u nginx | redactor > ticket-anhang.txt
-xclip -o | redactor | xclip -i          # Zwischenablage anonymisieren
+journalctl -u nginx --since today | redactor | mail -s "nginx-Fehler heute" support@example.com
+ssh web01 'tail -n 500 /var/log/syslog' | redactor | less
+docker logs app 2>&1 | redactor > app.log
+kubectl logs deploy/api | redactor | gh issue create -F - -t "api crash loop"
+xclip -o | redactor | xclip -i          # Zwischenablage anonymisieren (Linux)
+pbpaste | redactor | pbcopy             # dasselbe auf macOS
 ```
 
 ## 2. Mehrere Dateien anonymisieren, die zusammengehören

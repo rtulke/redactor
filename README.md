@@ -115,7 +115,12 @@ the price.
 ```bash
 cat /var/log/messages | redactor | less
 journalctl -u nginx | redactor > ticket-attachment.txt
-xclip -o | redactor | xclip -i          # anonymize the clipboard
+journalctl -u nginx --since today | redactor | mail -s "nginx errors today" support@example.com
+ssh web01 'tail -n 500 /var/log/syslog' | redactor | less
+docker logs app 2>&1 | redactor > app.log
+kubectl logs deploy/api | redactor | gh issue create -F - -t "api crash loop"
+xclip -o | redactor | xclip -i          # anonymize the clipboard (Linux)
+pbpaste | redactor | pbcopy             # same on macOS
 ```
 
 ## 2. Anonymizing several files that belong together
