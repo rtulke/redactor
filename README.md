@@ -8,6 +8,15 @@
 
 Anonymize texts, logs, READMEs and code — quickly and simply.
 
+Redactor is a local privacy tool for safely using logs, text, and source code with AI
+tools. Before content is sent to an AI service, it removes credentials and consistently
+pseudonymizes private and internal company data. This keeps the technical context intact
+so the AI can still understand and analyze the content without receiving the original
+sensitive values.
+
+Redactor makes logs, text, and code safer to use with AI tools — without unnecessarily
+exposing private or internal company data.
+
 `sed` with a predefined rule list: reads text from stdin (or from files), applies every
 rule from your config files, and writes the result to stdout.
 

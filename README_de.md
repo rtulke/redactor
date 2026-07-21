@@ -8,6 +8,15 @@
 
 Texte, Logs, READMEs und Code anonymisieren — schnell und einfach.
 
+Redactor ist ein lokales Datenschutz-Werkzeug, um Logs, Texte und Quellcode sicher mit
+KI-Tools zu verwenden. Bevor Inhalte an einen KI-Dienst geschickt werden, entfernt es
+Zugangsdaten und pseudonymisiert private und firmeninterne Daten konsistent. Der
+technische Kontext bleibt dabei erhalten, sodass die KI die Inhalte weiterhin verstehen
+und analysieren kann, ohne die sensiblen Originalwerte zu erhalten.
+
+Redactor macht Logs, Texte und Code sicherer für den Einsatz mit KI-Tools — ohne private
+oder firmeninterne Daten unnötig preiszugeben.
+
 `sed` mit fester Regel-Liste: liest Text von stdin (oder aus Dateien), wendet alle
 Regeln aus deinen Config-Dateien an und schreibt das Ergebnis nach stdout.
 
