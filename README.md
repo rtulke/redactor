@@ -108,7 +108,7 @@ the price.
 
 ---
 
-# The four typical workflows
+# Typical workflows
 
 ## 1. Piping a log through
 

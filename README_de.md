@@ -108,7 +108,7 @@ Ersparnis nicht wert.
 
 ---
 
-# Die vier typischen Workflows
+# Typische Workflows
 
 ## 1. Log kurz durchschleusen
 
