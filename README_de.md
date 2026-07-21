@@ -1,6 +1,6 @@
 # redactor
 
-**Version:** 1.3.0
+**Version:** 1.3.1
 **Author:** Robert Tulke <rt@debian.sh>
 **License:** MIT
 
@@ -29,15 +29,15 @@ Keine Abhängigkeiten, nur Python 3 (stdlib). Kein venv, kein PyPI.
 **Debian / Ubuntu**
 
 ```bash
-curl -LO https://github.com/rtulke/redactor/releases/latest/download/redactor_1.3.0_all.deb
-sudo apt install ./redactor_1.3.0_all.deb
+curl -LO https://github.com/rtulke/redactor/releases/latest/download/redactor_1.3.1_all.deb
+sudo apt install ./redactor_1.3.1_all.deb
 ```
 
 **RHEL / Rocky / Alma / Fedora**
 
 ```bash
-curl -LO https://github.com/rtulke/redactor/releases/latest/download/redactor-1.3.0-1.noarch.rpm
-sudo dnf install ./redactor-1.3.0-1.noarch.rpm
+curl -LO https://github.com/rtulke/redactor/releases/latest/download/redactor-1.3.1-1.noarch.rpm
+sudo dnf install ./redactor-1.3.1-1.noarch.rpm
 ```
 
 **macOS**
@@ -49,8 +49,8 @@ brew install rtulke/redactor/redactor
 **Ohne Installation**
 
 ```bash
-curl -LO https://github.com/rtulke/redactor/releases/latest/download/redactor-1.3.0.tar.gz
-tar xzf redactor-1.3.0.tar.gz && cd redactor-1.3.0
+curl -LO https://github.com/rtulke/redactor/releases/latest/download/redactor-1.3.1.tar.gz
+tar xzf redactor-1.3.1.tar.gz && cd redactor-1.3.1
 ./redactor.py --version
 ```
 
