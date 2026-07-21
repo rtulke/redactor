@@ -126,6 +126,13 @@ jobs:
       - name: Install and exercise
         run: |
           set -eux
+          # Ubuntu's Docker images are "minimized": /etc/dpkg/dpkg.cfg.d/excludes
+          # path-excludes /usr/share/man/*, so dpkg would silently drop our man
+          # page AT INSTALL TIME and the ls below would fail against a correct
+          # package. Debian's full images carry no such file (rm -f either way).
+          # A real Ubuntu server keeps it only until `unminimize` - and this
+          # test is about the package, not about Docker's disk-saving tricks.
+          rm -f /etc/dpkg/dpkg.cfg.d/excludes
           apt-get update
           apt-get install -y ./redactor_*_all.deb
           command -v redactor
