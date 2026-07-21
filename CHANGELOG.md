@@ -8,7 +8,14 @@ and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > `development/update_homebrew.sh` looks for it when it inserts the next
 > section. Keep the em-dash.
 
-## [1.3.1] — Current
+## [1.3.2] — Current
+
+### New Features
+
+some text and pipline fixes
+---
+
+## [1.3.1]
 
 ### New Features
 

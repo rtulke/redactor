@@ -90,7 +90,7 @@ import sys
 # read the version straight out of this file with
 #   __version__\s*=\s*'([^']+)'
 # so the quotes have to stay single and the assignment on one line.
-__version__ = '1.3.1'
+__version__ = '1.3.2'
 __author__ = 'Robert Tulke'
 __email__ = 'rt@debian.sh'
 __license__ = 'MIT'
