@@ -132,7 +132,31 @@ xclip -o | redactor | xclip -i          # Zwischenablage anonymisieren (Linux)
 pbpaste | redactor | pbcopy             # dasselbe auf macOS
 ```
 
-## 2. Mehrere Dateien anonymisieren, die zusammengehören
+## 2. An eine KI weiterreichen
+
+Jedes KI-CLI, das stdin liest, nimmt redactor als vorgeschalteten Filter — der Prompt
+behält den vollen technischen Kontext, nur eben ohne die echten Werte:
+
+```bash
+journalctl -u nginx | redactor | claude -p "warum schlagen diese Requests fehl?"  # Claude Code
+cat error.log      | redactor | gemini -p "finde die Ursache"                     # Gemini CLI
+{ echo "Review this log:"; redactor < app.log; } | codex exec -                   # Codex CLI
+docker logs app 2>&1     | redactor | llm "fasse die Fehler zusammen"             # llm
+kubectl logs deploy/api  | redactor | mods "was crasht hier?"                     # mods
+cat access.log | redactor | ollama run llama3.2 "fasse dieses Log zusammen"       # lokales Modell
+```
+
+Mit `--map` wird daraus ein Roundtrip: Die KI argumentiert über `host1` und `10.0.0.1`,
+und ihre Antwort wird hinterher auf deine echten Maschinen zurückübersetzt. Zwei
+Schritte, nicht eine Pipeline — `--unredact` lädt die Map beim Start, muss also *nach*
+dem schwärzenden Schritt laufen, der sie geschrieben hat:
+
+```bash
+journalctl -u nginx | redactor -m .redactor.map > clean.log
+claude -p "warum schlagen diese Requests fehl?" < clean.log | redactor -u -m .redactor.map
+```
+
+## 3. Mehrere Dateien anonymisieren, die zusammengehören
 
 **Hier ist `--map` wichtig.** Ohne Mapping-Datei fängt die Nummerierung bei jedem Aufruf
 neu an: `web01` wird in der README zu `host1`, im Code zu `host3` — und dein Paket ist
@@ -159,7 +183,7 @@ Die Map ist einfaches JSON, du kannst reinschauen und sie von Hand vorbelegen:
 > **Achtung:** Die Map ist der Schlüssel zum Zurückrechnen. Sie gehört **nicht** ins
 > Repo — steht bereits in `.gitignore`.
 
-## 3. Prüfen statt ersetzen (pre-commit / CI)
+## 4. Prüfen statt ersetzen (pre-commit / CI)
 
 `--check` schreibt keine Ausgabe, sondern meldet nur, was ersetzt *würde*, und liefert
 Exit-Code 1 bei Treffern:
@@ -186,7 +210,7 @@ if ! redactor --check $files; then
 fi
 ```
 
-## 4. Zurückrechnen
+## 5. Zurückrechnen
 
 Wenn dir jemand im Ticket auf `host1` antwortet, willst du wissen, welche Maschine das war:
 

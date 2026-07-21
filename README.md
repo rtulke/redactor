@@ -132,7 +132,31 @@ xclip -o | redactor | xclip -i          # anonymize the clipboard (Linux)
 pbpaste | redactor | pbcopy             # same on macOS
 ```
 
-## 2. Anonymizing several files that belong together
+## 2. Handing it to an AI
+
+Every AI CLI that reads stdin takes redactor as a filter in front of it — the prompt
+still carries the full technical context, just not the real values:
+
+```bash
+journalctl -u nginx | redactor | claude -p "why do these requests fail?"    # Claude Code
+cat error.log      | redactor | gemini -p "find the root cause"             # Gemini CLI
+{ echo "Review this log:"; redactor < app.log; } | codex exec -             # Codex CLI
+docker logs app 2>&1     | redactor | llm "summarize the errors"            # llm
+kubectl logs deploy/api  | redactor | mods "what is crashing here?"         # mods
+cat access.log | redactor | ollama run llama3.2 "summarize this log"        # local model
+```
+
+With `--map` this becomes a round trip: the AI reasons about `host1` and `10.0.0.1`,
+and its answer is translated back to your real machines afterwards. Two steps, not one
+pipeline — `--unredact` loads the map when it starts, so it has to run *after* the
+redacting step has written it:
+
+```bash
+journalctl -u nginx | redactor -m .redactor.map > clean.log
+claude -p "why do these requests fail?" < clean.log | redactor -u -m .redactor.map
+```
+
+## 3. Anonymizing several files that belong together
 
 **This is where `--map` matters.** Without a mapping file the numbering restarts on every
 invocation: `web01` becomes `host1` in the README and `host3` in the code — and your
@@ -159,7 +183,7 @@ The map is plain JSON; you can read it and pre-seed it by hand:
 > **Careful:** the map is the key to reversing the redaction. It does **not** belong in
 > the repo — it is already in `.gitignore`.
 
-## 3. Checking instead of replacing (pre-commit / CI)
+## 4. Checking instead of replacing (pre-commit / CI)
 
 `--check` writes no output; it only reports what *would* be replaced, and exits 1 on any
 match:
@@ -186,7 +210,7 @@ if ! redactor --check $files; then
 fi
 ```
 
-## 4. Reversing
+## 5. Reversing
 
 When someone replies to your ticket referring to `host1`, you want to know which machine
 that was:
